@@ -45,6 +45,8 @@ pub struct App {
     pins: HashMap<WindowId, PinWindow>,
     /// 鼠标所在的「活动」覆盖层（亮），其余覆盖层暗。
     active_overlay: Option<WindowId>,
+    /// 去抖：待确认的活动窗口（连续两次命中才切换）。
+    pending_active: Option<WindowId>,
     capturing: bool,
     started: bool,
     /// 延迟退出时刻（一次性模式：留出剪贴板管理器抓取内容的时间）。
@@ -65,6 +67,7 @@ impl App {
             overlays: HashMap::new(),
             pins: HashMap::new(),
             active_overlay: None,
+            pending_active: None,
             capturing: false,
             started: false,
             exit_deadline: None,
@@ -115,12 +118,24 @@ impl App {
             }
         }
 
-        // 初始活动屏：默认主显示器；鼠标进入其他屏幕后会立即切换。
-        let initial = self
-            .overlays
-            .values()
-            .find(|o| o.is_primary())
-            .map(|o| o.window_id())
+        // 初始活动屏：优先根据全局指针位置判定；否则主显示器。
+        let pointer = platform::pointer_position();
+        if let Some((x, y)) = pointer {
+            log::debug!("initial pointer at ({x},{y})");
+        }
+        let initial = pointer
+            .and_then(|(x, y)| {
+                self.overlays
+                    .values()
+                    .find(|o| o.contains_global_point(x, y))
+                    .map(|o| o.window_id())
+            })
+            .or_else(|| {
+                self.overlays
+                    .values()
+                    .find(|o| o.is_primary())
+                    .map(|o| o.window_id())
+            })
             .or_else(|| self.overlays.keys().next().copied());
         self.set_active_window(initial);
 
@@ -135,6 +150,7 @@ impl App {
             return;
         }
         self.active_overlay = active;
+        log::debug!("active overlay -> {active:?}");
         for (id, overlay) in self.overlays.iter_mut() {
             overlay.set_active(Some(*id) == active);
             overlay.request_redraw();
@@ -144,14 +160,21 @@ impl App {
     /// 鼠标进入某覆盖层时切换活动屏；拖拽中不切换，避免中断操作。
     fn maybe_activate(&mut self, window_id: WindowId) {
         if self.active_overlay == Some(window_id) {
+            self.pending_active = None;
             return;
         }
+        // 去抖：偶发的伪造 enter 只命中一次，不触发切换
+        if self.pending_active != Some(window_id) {
+            self.pending_active = Some(window_id);
+            return;
+        }
+        self.pending_active = None;
+
         if let Some(active) = self.active_overlay {
             if self.overlays.get(&active).is_some_and(|o| o.is_dragging()) {
                 return;
             }
         }
-        log::debug!("active overlay -> {:?}", window_id);
         self.set_active_window(Some(window_id));
     }
 
@@ -276,11 +299,19 @@ impl ApplicationHandler<UserEvent> for App {
         event: WindowEvent,
     ) {
         if self.overlays.contains_key(&window_id) {
-            // 鼠标进入/在屏幕上移动时，将其设为活动屏（亮），其余变暗
-            if matches!(
-                event,
-                WindowEvent::CursorEntered { .. } | WindowEvent::CursorMoved { .. }
-            ) {
+            // 用「指针真实坐标是否落在本窗口内」判定活动屏：
+            // 窗口映射/全屏过程中可能收到伪造的 CursorEntered，其坐标会越界。
+            let mut activate = false;
+            if let WindowEvent::CursorMoved { position, .. } = &event {
+                if let Some(overlay) = self.overlays.get(&window_id) {
+                    let size = overlay.window_inner_size();
+                    activate = position.x >= 0.0
+                        && position.y >= 0.0
+                        && position.x < size.width as f64 + 0.5
+                        && position.y < size.height as f64 + 0.5;
+                }
+            }
+            if activate {
                 self.maybe_activate(window_id);
             }
 

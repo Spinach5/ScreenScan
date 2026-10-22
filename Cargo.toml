@@ -38,6 +38,10 @@ anyhow = "1"                              # 错误处理
 log = "0.4"
 env_logger = "0.11"
 
+# X11：查询全局指针位置，用于启动时确定活动显示器（仅在 Linux/XWayland 下使用）
+[target.'cfg(target_os = "linux")'.dependencies]
+x11-dl = "2"
+
 [profile.release]
 opt-level = 3
 lto = "thin"

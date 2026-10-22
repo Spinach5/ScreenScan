@@ -27,6 +27,7 @@ use crate::annotate::render as annotate_render;
 use crate::app::UserEvent;
 use crate::capture::CapturedMonitor;
 use crate::graphics::RenderedWindow;
+use crate::platform;
 use crate::toolbar;
 use crate::util;
 use selection::HitArea;
@@ -594,16 +595,27 @@ impl Overlay {
             .with_resizable(false)
             .with_visible(false)
             .with_window_level(WindowLevel::AlwaysOnTop);
-        let attributes = match &handle {
-            Some(monitor) => {
-                base.with_fullscreen(Some(Fullscreen::Borderless(Some(monitor.clone()))))
-            }
-            None => base
+
+        // X11（XWayland）：用绝对坐标 + 尺寸精确覆盖目标显示器。
+        // Wayland：位置被忽略，改用「按显示器全屏」（首帧后再断言一次）。
+        let use_abs = platform::use_x11_backend();
+        let positioned = || {
+            base.clone()
                 .with_position(PhysicalPosition::new(screen.monitor.x, screen.monitor.y))
                 .with_inner_size(PhysicalSize::new(
                     screen.monitor.width,
                     screen.monitor.height,
-                )),
+                ))
+        };
+        let attributes = if use_abs {
+            positioned()
+        } else {
+            match &handle {
+                Some(monitor) => {
+                    base.with_fullscreen(Some(Fullscreen::Borderless(Some(monitor.clone()))))
+                }
+                None => positioned(),
+            }
         };
 
         let rendered = unsafe { RenderedWindow::create(event_loop, attributes)? };
@@ -637,21 +649,26 @@ impl Overlay {
             proxy,
         };
 
-        rendered.window().set_visible(true);
-        // 部分 Wayland 合成器需在窗口映射后再请求「按显示器全屏」。
-        if let Some(monitor) = &handle {
-            rendered
-                .window()
-                .set_fullscreen(Some(Fullscreen::Borderless(Some(monitor.clone()))));
+        // X11：首帧画好后再显示窗口，避免启动黑屏/闪烁。
+        // Wayland：需先映射窗口，之后才能按目标输出全屏。
+        if use_abs {
+            rendered.window().request_redraw();
+        } else {
+            rendered.window().set_visible(true);
+            if let Some(monitor) = &handle {
+                rendered
+                    .window()
+                    .set_fullscreen(Some(Fullscreen::Borderless(Some(monitor.clone()))));
+            }
+            rendered.window().focus_window();
+            rendered.window().request_redraw();
         }
-        rendered.window().focus_window();
-        rendered.window().request_redraw();
 
         Ok(Self {
             rendered,
             state,
             placed: false,
-            target_monitor: handle,
+            target_monitor: if use_abs { None } else { handle },
         })
     }
 
@@ -669,6 +686,16 @@ impl Overlay {
 
     pub fn is_primary(&self) -> bool {
         self.state.screen.monitor.is_primary
+    }
+
+    /// 全局物理坐标是否落在本覆盖层对应的显示器内。
+    pub fn contains_global_point(&self, x: i32, y: i32) -> bool {
+        let m = &self.state.screen.monitor;
+        x >= m.x && x < m.x + m.width as i32 && y >= m.y && y < m.y + m.height as i32
+    }
+
+    pub fn window_inner_size(&self) -> winit::dpi::PhysicalSize<u32> {
+        self.rendered.window().inner_size()
     }
 
     pub fn is_dragging(&self) -> bool {
@@ -717,18 +744,14 @@ impl Overlay {
 
         if !self.placed {
             self.placed = true;
-            // 首帧缓冲区已提交（surface 已映射），此时再按目标输出全屏，
-            // 部分 Wayland 合成器（如 Mutter）才会真正把窗口放到指定显示器。
+            // Wayland：首帧缓冲区已提交（surface 已映射），此时再按目标输出全屏，
+            // 部分合成器（如 Mutter）才会真正把窗口放到指定显示器。
             if let Some(monitor) = &self.target_monitor {
                 self.rendered
                     .window()
                     .set_fullscreen(Some(Fullscreen::Borderless(Some(monitor.clone()))));
             }
-            log::debug!(
-                "overlay[{}] inner={:?}",
-                self.state.screen.monitor.name,
-                self.rendered.window().inner_size()
-            );
+            self.rendered.window().focus_window();
         }
     }
 }

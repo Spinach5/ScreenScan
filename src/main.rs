@@ -35,7 +35,18 @@ fn main() -> anyhow::Result<()> {
     let one_shot =
         std::env::args().any(|arg| matches!(arg.as_str(), "-c" | "--capture" | "--once"));
 
-    let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
+    let mut builder = EventLoop::<UserEvent>::with_user_event();
+
+    // Wayland（Mutter）下无法可靠地把覆盖层窗口放到指定显示器；
+    // 有 XWayland 时优先使用 X11 后端，以便按显示器绝对定位。
+    #[cfg(target_os = "linux")]
+    if platform::use_x11_backend() {
+        use winit::platform::x11::EventLoopBuilderExtX11;
+        builder.with_x11();
+        log::info!("using winit X11 backend (XWayland) for deterministic multi-monitor placement");
+    }
+
+    let event_loop = builder.build()?;
     let proxy = event_loop.create_proxy();
     let mut app = App::new(proxy, one_shot);
     event_loop.run_app(&mut app)?;

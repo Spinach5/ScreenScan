@@ -22,6 +22,7 @@ dependencies = [
  "rxing",
  "tiny-skia 0.12.0",
  "winit",
+ "x11-dl",
  "xcap",
 ]
 
