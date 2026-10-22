@@ -18,6 +18,11 @@ pub enum UserEvent {
     Captured(Vec<CapturedMonitor>),
     /// 请求创建贴图窗口（图片为选区合成结果）。
     Pin(RgbaImage),
+    /// 后台扫描完成，路由回对应覆盖层。
+    ScanResult {
+        window_id: WindowId,
+        text: Result<String, String>,
+    },
 }
 
 pub struct App {
@@ -89,6 +94,12 @@ impl ApplicationHandler<UserEvent> for App {
         match event {
             UserEvent::Captured(screens) => self.open_overlays(event_loop, screens),
             UserEvent::Pin(image) => self.open_pin(event_loop, image),
+            UserEvent::ScanResult { window_id, text } => {
+                if let Some(overlay) = self.overlays.get_mut(&window_id) {
+                    overlay.set_scan_result(text);
+                    overlay.request_redraw();
+                }
+            }
         }
     }
 

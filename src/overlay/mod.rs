@@ -77,6 +77,12 @@ pub struct OverlayState {
     /// 橡皮擦本次拖拽累计移除的笔画（用于单条撤销记录）。
     pub erased_accum: Vec<Stroke>,
     pub close_requested: bool,
+    /// 本覆盖层窗口 id（用于回传异步结果路由）。
+    pub window_id: WindowId,
+    /// 扫描等操作的提示文本。
+    pub status: Option<String>,
+    /// 是否正在后台扫描。
+    pub scanning: bool,
     /// 回主线程的事件代理（贴图窗口创建等）。
     pub proxy: EventLoopProxy<UserEvent>,
 }
@@ -153,6 +159,22 @@ impl OverlayState {
         // 6) 应用工具栏动作
         self.apply_toolbar(action);
 
+        // 6.1) 状态提示（toast）
+        if let Some(status) = &self.status {
+            let toast = egui::Rect::from_center_size(
+                egui::pos2(screen_rect.center().x, screen_rect.min.y + 36.0),
+                egui::vec2(280.0, 34.0),
+            );
+            painter.rect_filled(toast, 6.0, egui::Color32::from_black_alpha(210));
+            painter.text(
+                toast.center(),
+                egui::Align2::CENTER_CENTER,
+                status,
+                egui::FontId::proportional(16.0),
+                egui::Color32::WHITE,
+            );
+        }
+
         // 7) Esc：绘制中退回选区调整，其余状态退出
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             if self.state == State::Annotating {
@@ -187,6 +209,50 @@ impl OverlayState {
         }
         if action.pin {
             self.perform_pin();
+        }
+        if action.scan {
+            self.perform_scan();
+        }
+    }
+
+    /// 后台扫描选区内的条码/二维码，结果经 UserEvent 回主线程。
+    fn perform_scan(&mut self) {
+        if self.scanning {
+            return;
+        }
+        let Some(selection) = self.selection else {
+            return;
+        };
+        let (base, origin) = util::image::crop(&self.screen.image, selection.rect);
+        let composed = annotate_render::compose(&base, &self.board.strokes, origin, self.scale);
+
+        self.scanning = true;
+        self.status = Some("扫描中...".into());
+
+        let proxy = self.proxy.clone();
+        let window_id = self.window_id;
+        std::thread::spawn(move || {
+            let text = actions::scan::decode(&composed).map_err(|e| e.to_string());
+            let _ = proxy.send_event(UserEvent::ScanResult { window_id, text });
+        });
+    }
+
+    /// 接收后台扫描结果（主线程调用）。
+    pub fn set_scan_result(&mut self, result: Result<String, String>) {
+        self.scanning = false;
+        match result {
+            Ok(text) => {
+                let message = match actions::copy_text(&text) {
+                    Ok(()) => "已复制到剪贴板".to_string(),
+                    Err(e) => format!("复制失败: {e}"),
+                };
+                log::info!("扫描结果: {text}");
+                self.status = Some(message);
+            }
+            Err(e) => {
+                log::info!("扫描失败: {e}");
+                self.status = Some("未识别到条码".to_string());
+            }
         }
     }
 
@@ -239,7 +305,6 @@ impl OverlayState {
             ActionOutcome::Failed(msg) => {
                 log::warn!("动作失败: {msg}");
             }
-            _ => {}
         }
     }
 
@@ -470,6 +535,9 @@ impl Overlay {
             drawing: None,
             erased_accum: Vec::new(),
             close_requested: false,
+            window_id: rendered.window_id(),
+            status: None,
+            scanning: false,
             proxy,
         };
 
@@ -482,6 +550,14 @@ impl Overlay {
 
     pub fn window_id(&self) -> WindowId {
         self.rendered.window_id()
+    }
+
+    pub fn request_redraw(&self) {
+        self.rendered.window().request_redraw();
+    }
+
+    pub fn set_scan_result(&mut self, result: Result<String, String>) {
+        self.state.set_scan_result(result);
     }
 
     /// 处理窗口事件；返回 `true` 表示本覆盖层应被关闭。

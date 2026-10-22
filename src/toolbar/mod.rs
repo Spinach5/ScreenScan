@@ -16,6 +16,7 @@ pub struct ToolbarAction {
     pub copy: bool,
     pub save: bool,
     pub pin: bool,
+    pub scan: bool,
     pub set_kind: Option<ToolKind>,
     pub set_color: Option<Color32>,
     pub set_width: Option<f32>,
@@ -24,7 +25,7 @@ pub struct ToolbarAction {
 }
 
 /// 工具栏尺寸估算（用于定位与越界翻转）。
-const ESTIMATED_SIZE: Vec2 = Vec2::new(560.0, 44.0);
+const ESTIMATED_SIZE: Vec2 = Vec2::new(650.0, 44.0);
 const GAP: f32 = 8.0;
 const MARGIN: f32 = 4.0;
 
@@ -93,6 +94,9 @@ pub fn show(
                     }
                     if ui.button("贴图").clicked() {
                         action.pin = true;
+                    }
+                    if ui.button("扫描").clicked() {
+                        action.scan = true;
                     }
                 });
             });
