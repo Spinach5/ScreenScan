@@ -2,6 +2,7 @@ mod actions;
 mod annotate;
 mod app;
 mod capture;
+mod font;
 mod graphics;
 mod overlay;
 mod pin;

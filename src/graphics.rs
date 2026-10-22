@@ -123,10 +123,7 @@ impl GlWindow {
 
     /// 绘制前把本窗口的上下文设为当前（多窗口各自独立上下文）。
     pub fn make_current(&self) {
-        assert!(
-            self.try_make_current(),
-            "failed to make GL context current"
-        );
+        assert!(self.try_make_current(), "failed to make GL context current");
     }
 
     /// 尝试把上下文设为当前；窗口已销毁时返回 false。
@@ -180,6 +177,9 @@ impl RenderedWindow {
         let scale = gl.window().scale_factor() as f32;
         let egui_glow =
             egui_glow::winit::EguiGlow::new(event_loop, glow.clone(), None, Some(scale), true);
+
+        // 补齐默认字体缺失的中文字形
+        crate::font::install(&egui_glow.egui_ctx);
 
         // egui 请求重绘时，唤醒本窗口
         let window = gl.window().clone();
