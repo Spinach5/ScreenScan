@@ -14,7 +14,12 @@ use winit::event_loop::EventLoop;
 use crate::app::{App, UserEvent};
 
 fn main() -> anyhow::Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    // 默认抑制 libwayshot_xcap 在部分合成器上的 wl_output 版本告警与 zbus 握手噪音
+    env_logger::Builder::from_env(
+        env_logger::Env::default()
+            .default_filter_or("warn,ScreenScan=info,libwayshot_xcap=off,zbus=warn,tracing=warn"),
+    )
+    .init();
 
     let session = if platform::is_wayland() {
         "wayland"

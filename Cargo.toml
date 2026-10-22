@@ -10,7 +10,7 @@ xcap = "0.9"                              # 全平台捕获（DXGI / ScreenCaptu
 
 # ── 窗口与渲染（winit 0.30 三件套）───────
 winit = "0.30"                            # 事件循环 + 窗口；features 按需启用 wayland/x11
-egui = "0.37"                             # UI 与 Painter
+egui = { version = "0.37", features = ["default_fonts"] }  # UI 与 Painter（default_fonts 必需，否则文字不可见）
 egui-winit = "0.37"                       # winit 事件 → egui 输入
 egui_glow = { version = "0.37", features = ["winit"] }  # OpenGL 渲染后端
 glow = "0.17"                             # OpenGL 绑定（与 egui_glow 同版本）

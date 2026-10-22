@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::time::Duration;
+use std::time::Instant;
 
 use global_hotkey::GlobalHotKeyEvent;
 use global_hotkey::GlobalHotKeyManager;
@@ -10,6 +12,7 @@ use image::RgbaImage;
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
+use winit::event_loop::ControlFlow;
 use winit::event_loop::EventLoopProxy;
 use winit::window::WindowId;
 
@@ -42,6 +45,8 @@ pub struct App {
     pins: HashMap<WindowId, PinWindow>,
     capturing: bool,
     started: bool,
+    /// 延迟退出时刻（一次性模式：留出剪贴板管理器抓取内容的时间）。
+    exit_deadline: Option<Instant>,
     /// 执行一次截图后退出（`-c` / Wayland）。
     one_shot: bool,
     /// 常驻等待全局快捷键。
@@ -59,6 +64,7 @@ impl App {
             pins: HashMap::new(),
             capturing: false,
             started: false,
+            exit_deadline: None,
             one_shot,
             resident: false,
             hotkey_manager: None,
@@ -115,8 +121,16 @@ impl App {
         }
 
         if !self.resident && self.overlays.is_empty() && self.pins.is_empty() {
-            event_loop.exit();
+            self.schedule_exit(event_loop);
         }
+    }
+
+    /// 一次性模式退出前稍作延迟，给剪贴板管理器抓取内容的时间
+    /// （X11 剪贴板内容随进程退出而失效）。
+    fn schedule_exit(&mut self, event_loop: &ActiveEventLoop) {
+        let deadline = Instant::now() + Duration::from_millis(500);
+        self.exit_deadline = Some(deadline);
+        event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
     }
 
     fn open_pin(&mut self, event_loop: &ActiveEventLoop, image: RgbaImage) {
@@ -208,7 +222,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.capturing = false;
                 log::error!("capture failed: {message}");
                 if !self.resident && self.overlays.is_empty() && self.pins.is_empty() {
-                    event_loop.exit();
+                    self.schedule_exit(event_loop);
                 }
             }
             UserEvent::Hotkey { id, pressed } => {
@@ -237,7 +251,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // Esc / 动作完成对整个截图会话生效：关闭所有屏幕的覆盖层
                 self.overlays.clear();
                 if !self.resident && self.pins.is_empty() {
-                    event_loop.exit();
+                    self.schedule_exit(event_loop);
                 }
             }
             return;
@@ -248,8 +262,18 @@ impl ApplicationHandler<UserEvent> for App {
             if close {
                 self.pins.remove(&window_id);
                 if !self.resident && self.pins.is_empty() && self.overlays.is_empty() {
-                    event_loop.exit();
+                    self.schedule_exit(event_loop);
                 }
+            }
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(deadline) = self.exit_deadline {
+            if Instant::now() >= deadline {
+                event_loop.exit();
+            } else {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
             }
         }
     }

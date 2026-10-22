@@ -123,9 +123,15 @@ impl GlWindow {
 
     /// 绘制前把本窗口的上下文设为当前（多窗口各自独立上下文）。
     pub fn make_current(&self) {
-        self.gl_context
-            .make_current(&self.gl_surface)
-            .expect("failed to make GL context current");
+        assert!(
+            self.try_make_current(),
+            "failed to make GL context current"
+        );
+    }
+
+    /// 尝试把上下文设为当前；窗口已销毁时返回 false。
+    pub fn try_make_current(&self) -> bool {
+        self.gl_context.make_current(&self.gl_surface).is_ok()
     }
 
     pub fn resize(&self, size: PhysicalSize<u32>) {
@@ -228,5 +234,14 @@ impl RenderedWindow {
         self.egui_glow.paint(&window);
         self.gl.swap_buffers();
         self.gl.window().set_visible(true);
+    }
+}
+
+impl Drop for RenderedWindow {
+    fn drop(&mut self) {
+        // 释放 egui_glow 的 GL 资源（需在上下文为当前时调用）
+        if self.gl.try_make_current() {
+            self.egui_glow.destroy();
+        }
     }
 }
