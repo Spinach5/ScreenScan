@@ -19,6 +19,12 @@ use winit::window::WindowLevel;
 
 use crate::actions;
 use crate::actions::ActionOutcome;
+use crate::annotate;
+use crate::annotate::AnnotationBoard;
+use crate::annotate::Stroke;
+use crate::annotate::Tool;
+use crate::annotate::ToolKind;
+use crate::annotate::render as annotate_render;
 use crate::capture::CapturedMonitor;
 use crate::graphics::GlWindow;
 use crate::toolbar;
@@ -29,6 +35,8 @@ use selection::Selection;
 
 /// 控制点半径（逻辑点）。
 const HANDLE_R_PT: f32 = 4.0;
+/// 橡皮擦默认线宽（逻辑点）。
+const DEFAULT_WIDTH: f32 = 3.0;
 
 /// 覆盖层状态机。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +67,16 @@ pub struct OverlayState {
     pub anchor: Option<Pos2>,
     /// 当前缩放/平移拖拽。
     pub drag: Option<Drag>,
+    /// 标注笔画列表 + 撤销/重做。
+    pub board: AnnotationBoard,
+    /// 当前工具类型、颜色、线宽（逻辑点）。
+    pub tool_kind: ToolKind,
+    pub color: egui::Color32,
+    pub width: f32,
+    /// 正在绘制的一笔。
+    pub drawing: Option<Stroke>,
+    /// 橡皮擦本次拖拽累计移除的笔画（用于单条撤销记录）。
+    pub erased_accum: Vec<Stroke>,
     pub close_requested: bool,
 }
 
@@ -88,17 +106,28 @@ impl OverlayState {
 
         // 2) 工具栏（叠加在同一视口，foreground 层）
         let mut action = toolbar::ToolbarAction::default();
-        let mut toolbar_over_pointer = false;
         if let Some(sel_pts) = self.selection.map(|s| self.physical_rect_to_points(s.rect)) {
             if matches!(self.state, State::Selected | State::Annotating) {
-                let resp = toolbar::show(&ctx, sel_pts, screen_rect);
-                action = resp.action;
-                toolbar_over_pointer = resp.contains_pointer;
+                action = toolbar::show(
+                    &ctx,
+                    sel_pts,
+                    screen_rect,
+                    self.tool_kind,
+                    self.color,
+                    self.width,
+                    self.board.can_undo(),
+                    self.board.can_redo(),
+                );
             }
         }
 
-        // 3) 处理输入（指针在工具栏上且未处于拖拽时，跳过选区交互）
-        if !(toolbar_over_pointer && self.drag.is_none()) {
+        // 3) 处理输入。指针落在任意 egui 前景层（工具栏/颜色弹窗）时跳过交互，
+        //    但正在拖拽或绘制时不跳过，避免指针划过工具栏导致操作中断。
+        let pointer_over_ui = ctx.input(|i| i.pointer.latest_pos()).is_some_and(|p| {
+            ctx.layer_id_at(p)
+                .is_some_and(|layer| layer != egui::LayerId::background())
+        });
+        if !(pointer_over_ui && self.drag.is_none() && self.drawing.is_none()) {
             self.handle_input(&ctx);
         }
 
@@ -108,30 +137,73 @@ impl OverlayState {
             render::draw_mask(&painter, tex, screen_rect, sel_pts);
         }
 
-        // 5) 选区边框 + 控制点
+        // 5) 选区边框 + 控制点 + 标注
         if let Some(sel_pts) = sel_pts {
             render::draw_border(&painter, sel_pts);
             if self.state == State::Selected {
                 render::draw_handles(&painter, sel_pts, HANDLE_R_PT);
             }
+            annotate_render::draw_strokes(&painter, &self.board.strokes, sel_pts);
+            if let Some(drawing) = &self.drawing {
+                annotate_render::draw_strokes(&painter, std::slice::from_ref(drawing), sel_pts);
+            }
         }
 
-        // 6) 执行工具栏动作
-        if action.copy || action.save {
-            self.perform_action(action.copy);
-        }
+        // 6) 应用工具栏动作
+        self.apply_toolbar(action);
 
+        // 7) Esc：绘制中退回选区调整，其余状态退出
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.close_requested = true;
+            if self.state == State::Annotating {
+                self.state = State::Selected;
+            } else {
+                self.close_requested = true;
+            }
         }
     }
 
-    /// 执行复制/保存：裁剪选区（后续里程碑会先合成标注）。
+    fn apply_toolbar(&mut self, action: toolbar::ToolbarAction) {
+        if let Some(kind) = action.set_kind {
+            self.tool_kind = kind;
+            self.state = State::Annotating;
+            self.drag = None;
+            self.drawing = None;
+        }
+        if let Some(color) = action.set_color {
+            self.color = color;
+        }
+        if let Some(width) = action.set_width {
+            self.width = width;
+        }
+        if action.undo {
+            self.board.undo();
+        }
+        if action.redo {
+            self.board.redo();
+        }
+        if action.copy || action.save {
+            self.perform_action(action.copy);
+        }
+    }
+
+    fn current_tool(&self) -> Tool {
+        match self.tool_kind {
+            ToolKind::Brush => Tool::Brush {
+                color: self.color,
+                width: self.width,
+            },
+            ToolKind::Scribble => Tool::Scribble { color: self.color },
+            ToolKind::Eraser => Tool::Eraser { width: self.width },
+        }
+    }
+
+    /// 执行复制/保存：裁剪选区并合成标注。
     fn perform_action(&mut self, is_copy: bool) {
         let Some(selection) = self.selection else {
             return;
         };
-        let composed = util::image::crop(&self.screen.image, selection.rect);
+        let (base, origin) = util::image::crop(&self.screen.image, selection.rect);
+        let composed = annotate_render::compose(&base, &self.board.strokes, origin, self.scale);
         let outcome = if is_copy {
             actions::copy(&composed)
         } else {
@@ -185,12 +257,16 @@ impl OverlayState {
         });
         let handle_r = HANDLE_R_PT * self.scale;
 
-        // 右键：取消当前选区
+        // 右键：绘制中撤销上一笔；其余取消选区
         if secondary_pressed {
-            self.selection = None;
-            self.anchor = None;
-            self.drag = None;
-            self.state = State::Idle;
+            if self.state == State::Annotating {
+                self.board.undo();
+            } else {
+                self.selection = None;
+                self.anchor = None;
+                self.drag = None;
+                self.state = State::Idle;
+            }
             return;
         }
 
@@ -208,6 +284,9 @@ impl OverlayState {
                 if let (Some(anchor), Some(p)) = (self.anchor, pos) {
                     self.selection = Some(Selection::new(anchor, p));
                 }
+            }
+            State::Annotating => {
+                self.handle_draw(pointer, primary_pressed, primary_down, primary_released);
             }
             State::Selected => {
                 if primary_pressed {
@@ -262,6 +341,64 @@ impl OverlayState {
 
         if primary_released {
             self.drag = None;
+        }
+    }
+
+    /// 绘制状态下的输入处理。`pointer` 为逻辑点（笔画坐标空间）。
+    fn handle_draw(&mut self, pointer: Option<Pos2>, pressed: bool, down: bool, released: bool) {
+        let is_eraser = self.tool_kind == ToolKind::Eraser;
+
+        if pressed && self.drawing.is_none() {
+            let scale = self.scale;
+            let inside = match (pointer, self.selection) {
+                (Some(pt), Some(sel)) => sel.rect.contains(egui::pos2(pt.x * scale, pt.y * scale)),
+                _ => false,
+            };
+            if inside {
+                if let Some(pt) = pointer {
+                    let mut stroke = Stroke::new(self.current_tool());
+                    stroke.points.push(pt);
+                    self.drawing = Some(stroke);
+                    self.erased_accum.clear();
+                }
+            }
+        }
+
+        if down && self.drawing.is_some() {
+            if let Some(pt) = pointer {
+                let should_add = self
+                    .drawing
+                    .as_ref()
+                    .and_then(|d| d.points.last())
+                    .is_none_or(|last| (*last - pt).length() > 0.5);
+                if should_add {
+                    let width = {
+                        let d = self.drawing.as_mut().expect("drawing stroke exists");
+                        d.points.push(pt);
+                        d.width
+                    };
+                    if is_eraser {
+                        let n = self.drawing.as_ref().map(|d| d.points.len()).unwrap_or(0);
+                        if n >= 2 {
+                            let d = self.drawing.as_ref().expect("drawing stroke exists");
+                            let segment = [d.points[n - 2], d.points[n - 1]];
+                            let removed = self.board.remove_intersecting(&segment, width);
+                            self.erased_accum.extend(removed);
+                        }
+                    }
+                }
+            }
+        }
+
+        if released {
+            if let Some(drawing) = self.drawing.take() {
+                if is_eraser {
+                    let removed = std::mem::take(&mut self.erased_accum);
+                    self.board.record_erase(removed);
+                } else if !drawing.points.is_empty() {
+                    self.board.push(drawing);
+                }
+            }
         }
     }
 
@@ -325,6 +462,12 @@ impl Overlay {
             selection: None,
             anchor: None,
             drag: None,
+            board: AnnotationBoard::default(),
+            tool_kind: ToolKind::Brush,
+            color: annotate::render::DEFAULT_COLOR,
+            width: DEFAULT_WIDTH,
+            drawing: None,
+            erased_accum: Vec::new(),
             close_requested: false,
         };
 

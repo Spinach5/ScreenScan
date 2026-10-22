@@ -1,4 +1,5 @@
 mod actions;
+mod annotate;
 mod app;
 mod capture;
 mod graphics;
