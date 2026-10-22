@@ -84,10 +84,9 @@ impl ApplicationHandler<UserEvent> for App {
         };
         let close = overlay.handle_window_event(event_loop, &event);
         if close {
-            self.overlays.remove(&window_id);
-            if self.overlays.is_empty() {
-                event_loop.exit();
-            }
+            // Esc / 动作完成对整个截图会话生效：关闭所有屏幕的覆盖层
+            self.overlays.clear();
+            event_loop.exit();
         }
     }
 }

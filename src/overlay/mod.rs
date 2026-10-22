@@ -17,8 +17,12 @@ use winit::window::WindowAttributes;
 use winit::window::WindowId;
 use winit::window::WindowLevel;
 
+use crate::actions;
+use crate::actions::ActionOutcome;
 use crate::capture::CapturedMonitor;
 use crate::graphics::GlWindow;
+use crate::toolbar;
+use crate::util;
 use selection::HitArea;
 use selection::MIN_SELECTION;
 use selection::Selection;
@@ -82,16 +86,29 @@ impl OverlayState {
             render::draw_screenshot(&painter, tex, screen_rect);
         }
 
-        // 2) 处理输入（更新选区/状态）
-        self.handle_input(&ctx);
+        // 2) 工具栏（叠加在同一视口，foreground 层）
+        let mut action = toolbar::ToolbarAction::default();
+        let mut toolbar_over_pointer = false;
+        if let Some(sel_pts) = self.selection.map(|s| self.physical_rect_to_points(s.rect)) {
+            if matches!(self.state, State::Selected | State::Annotating) {
+                let resp = toolbar::show(&ctx, sel_pts, screen_rect);
+                action = resp.action;
+                toolbar_over_pointer = resp.contains_pointer;
+            }
+        }
 
-        // 3) 蒙层 + 选区挖空
+        // 3) 处理输入（指针在工具栏上且未处于拖拽时，跳过选区交互）
+        if !(toolbar_over_pointer && self.drag.is_none()) {
+            self.handle_input(&ctx);
+        }
+
+        // 4) 蒙层 + 选区挖空
         let sel_pts = self.selection.map(|s| self.physical_rect_to_points(s.rect));
         if let Some(tex) = tex {
             render::draw_mask(&painter, tex, screen_rect, sel_pts);
         }
 
-        // 4) 选区边框 + 控制点
+        // 5) 选区边框 + 控制点
         if let Some(sel_pts) = sel_pts {
             render::draw_border(&painter, sel_pts);
             if self.state == State::Selected {
@@ -99,9 +116,47 @@ impl OverlayState {
             }
         }
 
+        // 6) 执行工具栏动作
+        if action.copy || action.save {
+            self.perform_action(action.copy);
+        }
+
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.close_requested = true;
         }
+    }
+
+    /// 执行复制/保存：裁剪选区（后续里程碑会先合成标注）。
+    fn perform_action(&mut self, is_copy: bool) {
+        let Some(selection) = self.selection else {
+            return;
+        };
+        let composed = util::image::crop(&self.screen.image, selection.rect);
+        let outcome = if is_copy {
+            actions::copy(&composed)
+        } else {
+            actions::save(&composed)
+        };
+
+        match outcome {
+            ActionOutcome::Copied => {
+                log::info!("已复制到剪贴板");
+                self.finish();
+            }
+            ActionOutcome::Saved(path) => {
+                log::info!("已保存: {}", path.display());
+                self.finish();
+            }
+            ActionOutcome::Failed(msg) => {
+                log::warn!("动作失败: {msg}");
+            }
+            _ => {}
+        }
+    }
+
+    fn finish(&mut self) {
+        self.state = State::Done;
+        self.close_requested = true;
     }
 
     fn handle_input(&mut self, ctx: &egui::Context) {

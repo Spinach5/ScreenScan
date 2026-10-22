@@ -1,8 +1,11 @@
+mod actions;
 mod app;
 mod capture;
 mod graphics;
 mod overlay;
 mod platform;
+mod toolbar;
+mod util;
 
 use winit::event_loop::EventLoop;
 
