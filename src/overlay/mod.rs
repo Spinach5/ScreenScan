@@ -3,16 +3,14 @@
 mod render;
 mod selection;
 
-use std::sync::Arc;
-
 use egui::Pos2;
 use egui::Rect;
 use egui::Vec2;
-use egui_glow::winit::EguiGlow;
 use winit::dpi::PhysicalPosition;
 use winit::dpi::PhysicalSize;
 use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
+use winit::event_loop::EventLoopProxy;
 use winit::window::WindowAttributes;
 use winit::window::WindowId;
 use winit::window::WindowLevel;
@@ -25,8 +23,9 @@ use crate::annotate::Stroke;
 use crate::annotate::Tool;
 use crate::annotate::ToolKind;
 use crate::annotate::render as annotate_render;
+use crate::app::UserEvent;
 use crate::capture::CapturedMonitor;
-use crate::graphics::GlWindow;
+use crate::graphics::RenderedWindow;
 use crate::toolbar;
 use crate::util;
 use selection::HitArea;
@@ -78,6 +77,8 @@ pub struct OverlayState {
     /// 橡皮擦本次拖拽累计移除的笔画（用于单条撤销记录）。
     pub erased_accum: Vec<Stroke>,
     pub close_requested: bool,
+    /// 回主线程的事件代理（贴图窗口创建等）。
+    pub proxy: EventLoopProxy<UserEvent>,
 }
 
 impl OverlayState {
@@ -183,6 +184,22 @@ impl OverlayState {
         }
         if action.copy || action.save {
             self.perform_action(action.copy);
+        }
+        if action.pin {
+            self.perform_pin();
+        }
+    }
+
+    /// 请求贴图：合成选区后把图片交给主线程创建贴图窗口。
+    fn perform_pin(&mut self) {
+        let Some(selection) = self.selection else {
+            return;
+        };
+        let (base, origin) = util::image::crop(&self.screen.image, selection.rect);
+        let composed = annotate_render::compose(&base, &self.board.strokes, origin, self.scale);
+        match self.proxy.send_event(UserEvent::Pin(composed)) {
+            Ok(()) => log::info!("请求创建贴图窗口"),
+            Err(e) => log::warn!("贴图事件发送失败: {e}"),
         }
     }
 
@@ -413,14 +430,16 @@ impl OverlayState {
 
 /// 覆盖层窗口（GL 上下文 + egui 渲染 + 状态）。
 pub struct Overlay {
-    gl: GlWindow,
-    glow: Arc<glow::Context>,
-    egui_glow: EguiGlow,
+    rendered: RenderedWindow,
     state: OverlayState,
 }
 
 impl Overlay {
-    pub fn create(event_loop: &ActiveEventLoop, screen: CapturedMonitor) -> anyhow::Result<Self> {
+    pub fn create(
+        event_loop: &ActiveEventLoop,
+        screen: CapturedMonitor,
+        proxy: EventLoopProxy<UserEvent>,
+    ) -> anyhow::Result<Self> {
         let attributes = WindowAttributes::default()
             .with_title("ScreenScan")
             .with_decorations(false)
@@ -433,26 +452,8 @@ impl Overlay {
                 screen.monitor.height,
             ));
 
-        let gl = unsafe { GlWindow::new(event_loop, attributes)? };
-
-        let glow = unsafe {
-            Arc::new(glow::Context::from_loader_function(|s| {
-                let s = std::ffi::CString::new(s)
-                    .expect("failed to build C string for GL proc address");
-                gl.get_proc_address(&s)
-            }))
-        };
-
-        let scale = gl.window().scale_factor() as f32;
-        let egui_glow = EguiGlow::new(event_loop, glow.clone(), None, Some(scale), true);
-
-        // egui 请求重绘时，唤醒本窗口
-        let window = gl.window().clone();
-        egui_glow
-            .egui_ctx
-            .set_request_repaint_callback(move |_info| {
-                window.request_redraw();
-            });
+        let rendered = unsafe { RenderedWindow::create(event_loop, attributes)? };
+        let scale = rendered.scale();
 
         let state = OverlayState {
             screen,
@@ -469,22 +470,18 @@ impl Overlay {
             drawing: None,
             erased_accum: Vec::new(),
             close_requested: false,
+            proxy,
         };
 
-        gl.window().set_visible(true);
-        gl.window().focus_window();
-        gl.window().request_redraw();
+        rendered.window().set_visible(true);
+        rendered.window().focus_window();
+        rendered.window().request_redraw();
 
-        Ok(Self {
-            gl,
-            glow,
-            egui_glow,
-            state,
-        })
+        Ok(Self { rendered, state })
     }
 
     pub fn window_id(&self) -> WindowId {
-        self.gl.window().id()
+        self.rendered.window_id()
     }
 
     /// 处理窗口事件；返回 `true` 表示本覆盖层应被关闭。
@@ -508,13 +505,11 @@ impl Overlay {
         }
 
         if let Resized(size) = event {
-            self.gl.resize(*size);
+            self.rendered.resize(*size);
         }
 
-        let window = self.gl.window().clone();
-        let response = self.egui_glow.on_window_event(&window, event);
-        if response.repaint {
-            window.request_redraw();
+        if self.rendered.on_window_event(event) {
+            self.rendered.window().request_redraw();
         }
         let _ = event_loop;
 
@@ -522,18 +517,7 @@ impl Overlay {
     }
 
     fn redraw(&mut self) {
-        let window = self.gl.window().clone();
-        self.egui_glow.run(&window, |ui| self.state.ui(ui));
-
-        self.gl.make_current();
-        unsafe {
-            use glow::HasContext as _;
-            self.glow.clear_color(0.0, 0.0, 0.0, 1.0);
-            self.glow.clear(glow::COLOR_BUFFER_BIT);
-        }
-
-        self.egui_glow.paint(&window);
-        self.gl.swap_buffers();
-        self.gl.window().set_visible(true);
+        self.rendered.render(|ui| self.state.ui(ui));
+        self.rendered.window().set_visible(true);
     }
 }

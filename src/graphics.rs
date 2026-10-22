@@ -146,3 +146,87 @@ impl GlWindow {
         self.gl_display.get_proc_address(addr)
     }
 }
+
+/// 组装好的窗口：glutin 上下文 + glow + egui 渲染，供覆盖层与贴图窗口共用。
+pub struct RenderedWindow {
+    gl: GlWindow,
+    glow: Arc<glow::Context>,
+    egui_glow: egui_glow::winit::EguiGlow,
+}
+
+impl RenderedWindow {
+    /// # Safety
+    /// 创建原生 OpenGL 上下文，需要调用方保证在主线程执行。
+    pub unsafe fn create(
+        event_loop: &ActiveEventLoop,
+        attributes: WindowAttributes,
+    ) -> anyhow::Result<Self> {
+        let gl = unsafe { GlWindow::new(event_loop, attributes)? };
+
+        let glow = unsafe {
+            Arc::new(glow::Context::from_loader_function(|s| {
+                let s = std::ffi::CString::new(s)
+                    .expect("failed to build C string for GL proc address");
+                gl.get_proc_address(&s)
+            }))
+        };
+
+        let scale = gl.window().scale_factor() as f32;
+        let egui_glow =
+            egui_glow::winit::EguiGlow::new(event_loop, glow.clone(), None, Some(scale), true);
+
+        // egui 请求重绘时，唤醒本窗口
+        let window = gl.window().clone();
+        egui_glow
+            .egui_ctx
+            .set_request_repaint_callback(move |_info| {
+                window.request_redraw();
+            });
+
+        Ok(Self {
+            gl,
+            glow,
+            egui_glow,
+        })
+    }
+
+    pub fn window(&self) -> &Arc<Window> {
+        self.gl.window()
+    }
+
+    pub fn window_id(&self) -> winit::window::WindowId {
+        self.gl.window().id()
+    }
+
+    pub fn scale(&self) -> f32 {
+        self.gl.window().scale_factor() as f32
+    }
+
+    pub fn resize(&self, size: PhysicalSize<u32>) {
+        self.gl.resize(size);
+    }
+
+    /// 把窗口事件喂给 egui；返回是否需要重绘。
+    pub fn on_window_event(&mut self, event: &winit::event::WindowEvent) -> bool {
+        let window = self.gl.window().clone();
+        let response = self.egui_glow.on_window_event(&window, event);
+        response.repaint
+    }
+
+    /// 跑一帧 UI：`run_ui` 构建界面，随后清屏、绘制、交换缓冲。
+    pub fn render(&mut self, run_ui: impl FnMut(&mut egui::Ui)) {
+        let window = self.gl.window().clone();
+        self.egui_glow.run(&window, run_ui);
+
+        self.gl.make_current();
+        unsafe {
+            use glow::HasContext as _;
+            self.glow.clear_color(0.0, 0.0, 0.0, 1.0);
+            self.glow.clear(glow::COLOR_BUFFER_BIT);
+        }
+
+        self.egui_glow.paint(&window);
+        self.gl.swap_buffers();
+        self.gl.window().set_visible(true);
+    }
+}

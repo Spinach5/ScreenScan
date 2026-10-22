@@ -4,6 +4,7 @@ mod app;
 mod capture;
 mod graphics;
 mod overlay;
+mod pin;
 mod platform;
 mod toolbar;
 mod util;

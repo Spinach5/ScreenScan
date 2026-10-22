@@ -15,6 +15,7 @@ use crate::annotate::ToolKind;
 pub struct ToolbarAction {
     pub copy: bool,
     pub save: bool,
+    pub pin: bool,
     pub set_kind: Option<ToolKind>,
     pub set_color: Option<Color32>,
     pub set_width: Option<f32>,
@@ -89,6 +90,9 @@ pub fn show(
                     }
                     if ui.button("保存").clicked() {
                         action.save = true;
+                    }
+                    if ui.button("贴图").clicked() {
+                        action.pin = true;
                     }
                 });
             });
