@@ -2,5 +2,42 @@
 name = "ScreenScan"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.95"
 
 [dependencies]
+# ── 屏幕捕获 ─────────────────────────────
+xcap = "0.9"                              # 全平台捕获（DXGI / ScreenCaptureKit / X11 / Wayland portal）
+
+# ── 窗口与渲染（winit 0.30 三件套）───────
+winit = "0.30"                            # 事件循环 + 窗口；features 按需启用 wayland/x11
+egui = "0.37"                             # UI 与 Painter
+egui-winit = "0.37"                       # winit 事件 → egui 输入
+egui_glow = { version = "0.37", features = ["winit"] }  # OpenGL 渲染后端
+glow = "0.17"                             # OpenGL 绑定（与 egui_glow 同版本）
+glutin = "0.32"                           # OpenGL 上下文（glow 后端需要）
+glutin-winit = "0.5"                      # glutin + winit 集成（config/窗口创建）
+
+# ── 图像与绘制 ───────────────────────────
+image = { version = "0.25", features = ["png", "jpeg", "webp"] }
+tiny-skia = "0.12"                        # 笔画离屏光栅化 / 最终合成
+
+# ── 剪贴板 ───────────────────────────────
+arboard = { version = "3.7", features = ["image-data"] }
+
+# ── 文件对话框 ───────────────────────────
+rfd = { version = "0.17", features = ["xdg-portal"] }   # xdg-portal 供 Wayland 使用
+
+# ── 条码识别 ─────────────────────────────
+rxing = "0.9"
+
+# ── 全局快捷键（可选）────────────────────
+global-hotkey = "0.9"
+
+# ── 基础设施 ─────────────────────────────
+anyhow = "1"                              # 错误处理
+log = "0.4"
+env_logger = "0.11"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
