@@ -100,6 +100,9 @@ impl OverlayState {
         let ctx = ui.ctx().clone();
         let screen_rect = ctx.viewport_rect();
 
+        // 鼠标模式：根据指针相对选区的位置切换光标形状
+        self.update_cursor(&ctx);
+
         // 懒上传冻结截图纹理
         if self.texture.is_none() {
             let img = &self.screen.image;
@@ -208,6 +211,30 @@ impl OverlayState {
                 self.close_requested = true;
             }
         }
+    }
+
+    fn update_cursor(&self, ctx: &egui::Context) {
+        let cursor = if self.state == State::Selected {
+            let pointer = ctx.input(|i| i.pointer.latest_pos());
+            let hit = match (pointer, self.selection) {
+                (Some(p), Some(sel)) => {
+                    let pos = egui::pos2(p.x * self.scale, p.y * self.scale);
+                    sel.hit_test(pos, HANDLE_R_PT * self.scale)
+                }
+                _ => HitArea::None,
+            };
+            match hit {
+                HitArea::N | HitArea::S => egui::CursorIcon::ResizeVertical,
+                HitArea::E | HitArea::W => egui::CursorIcon::ResizeHorizontal,
+                HitArea::NE | HitArea::SW => egui::CursorIcon::ResizeNeSw,
+                HitArea::NW | HitArea::SE => egui::CursorIcon::ResizeNwSe,
+                HitArea::Move => egui::CursorIcon::Move,
+                HitArea::None => egui::CursorIcon::Default,
+            }
+        } else {
+            egui::CursorIcon::Default
+        };
+        ctx.output_mut(|o| o.cursor_icon = cursor);
     }
 
     fn apply_toolbar(&mut self, action: toolbar::ToolbarAction) {
