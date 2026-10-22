@@ -1,7 +1,12 @@
 //! 覆盖层：每个显示器一个全屏窗口，显示冻结截图 + 蒙层 + 选区。
 
+mod render;
+mod selection;
+
 use std::sync::Arc;
 
+use egui::Pos2;
+use egui::Rect;
 use egui_glow::winit::EguiGlow;
 use winit::dpi::PhysicalPosition;
 use winit::dpi::PhysicalSize;
@@ -13,8 +18,9 @@ use winit::window::WindowLevel;
 
 use crate::capture::CapturedMonitor;
 use crate::graphics::GlWindow;
+use selection::Selection;
 
-/// 覆盖层状态机（后续里程碑逐步启用各状态）。
+/// 覆盖层状态机。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
     Idle,
@@ -30,6 +36,10 @@ pub struct OverlayState {
     pub texture: Option<egui::TextureHandle>,
     pub scale: f32,
     pub state: State,
+    /// 选区（物理像素）。
+    pub selection: Option<Selection>,
+    /// 拖拽起点（物理像素）。
+    pub anchor: Option<Pos2>,
     pub close_requested: bool,
 }
 
@@ -49,15 +59,107 @@ impl OverlayState {
                 Some(ctx.load_texture("screenshot", color_image, egui::TextureOptions::default()));
         }
 
-        if let Some(tex) = &self.texture {
-            let full_uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-            ui.painter()
-                .image(tex.id(), screen_rect, full_uv, egui::Color32::WHITE);
+        let painter = ui.painter().clone();
+        let tex = self.texture.as_ref().map(|t| t.id());
+
+        // 1) 冻结截图铺满全窗
+        if let Some(tex) = tex {
+            render::draw_screenshot(&painter, tex, screen_rect);
+        }
+
+        // 2) 处理输入（更新选区/状态）
+        self.handle_input(&ctx);
+
+        // 3) 蒙层 + 选区挖空
+        let sel_pts = self.selection.map(|s| self.physical_rect_to_points(s.rect));
+        if let Some(tex) = tex {
+            render::draw_mask(&painter, tex, screen_rect, sel_pts);
+        }
+
+        // 4) 选区边框
+        if let Some(sel_pts) = sel_pts {
+            render::draw_border(&painter, sel_pts);
         }
 
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.close_requested = true;
         }
+    }
+
+    fn handle_input(&mut self, ctx: &egui::Context) {
+        let (primary_pressed, primary_released, secondary_pressed, pointer) = ctx.input(|i| {
+            (
+                i.pointer.primary_pressed(),
+                i.pointer.primary_released(),
+                i.pointer.secondary_pressed(),
+                i.pointer.latest_pos(),
+            )
+        });
+
+        // 指针逻辑点 → 物理像素，并钳制在截图范围内
+        let image_size = self.screen.image.dimensions();
+        let pos = pointer.map(|p| {
+            egui::pos2(
+                (p.x * self.scale).clamp(0.0, image_size.0 as f32),
+                (p.y * self.scale).clamp(0.0, image_size.1 as f32),
+            )
+        });
+
+        // 右键：取消当前选区
+        if secondary_pressed {
+            self.selection = None;
+            self.anchor = None;
+            self.state = State::Idle;
+            return;
+        }
+
+        match self.state {
+            State::Idle => {
+                if primary_pressed {
+                    if let Some(p) = pos {
+                        self.anchor = Some(p);
+                        self.selection = Some(Selection::new(p, p));
+                        self.state = State::Selecting;
+                    }
+                }
+            }
+            State::Selecting => {
+                if let (Some(anchor), Some(p)) = (self.anchor, pos) {
+                    self.selection = Some(Selection::new(anchor, p));
+                }
+            }
+            State::Selected => {
+                // 里程碑 3 会替换为命中测试；当前点击空白处重新框选
+                if primary_pressed {
+                    if let Some(p) = pos {
+                        self.anchor = Some(p);
+                        self.selection = Some(Selection::new(p, p));
+                        self.state = State::Selecting;
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        // 释放统一在此收尾，兼容「按下与释放落在同一帧」的快速点击
+        if self.state == State::Selecting && primary_released {
+            let valid = self.selection.is_some_and(|s| s.is_valid());
+            if valid {
+                self.state = State::Selected;
+            } else {
+                self.selection = None;
+                self.state = State::Idle;
+            }
+            self.anchor = None;
+        }
+    }
+
+    /// 物理像素矩形 → 逻辑点矩形。
+    fn physical_rect_to_points(&self, rect: Rect) -> Rect {
+        Rect::from_min_max(
+            Pos2::new(rect.min.x / self.scale, rect.min.y / self.scale),
+            Pos2::new(rect.max.x / self.scale, rect.max.y / self.scale),
+        )
     }
 }
 
@@ -109,6 +211,8 @@ impl Overlay {
             texture: None,
             scale,
             state: State::Idle,
+            selection: None,
+            anchor: None,
             close_requested: false,
         };
 
