@@ -64,6 +64,24 @@ pub fn draw_border(painter: &Painter, selection: Rect) {
     painter.rect_stroke(selection, 0.0, Stroke::new(1.0, BORDER), StrokeKind::Inside);
 }
 
+/// 绘制 8 个控制点（四角 + 四边中点）。
+pub fn draw_handles(painter: &Painter, selection: Rect, radius: f32) {
+    let handles = [
+        selection.left_top(),
+        selection.center_top(),
+        selection.right_top(),
+        selection.left_center(),
+        selection.right_center(),
+        selection.left_bottom(),
+        selection.center_bottom(),
+        selection.right_bottom(),
+    ];
+    for p in handles {
+        painter.circle_filled(p, radius, Color32::WHITE);
+        painter.circle_stroke(p, radius, Stroke::new(1.0, Color32::BLACK));
+    }
+}
+
 fn full_uv() -> Rect {
     Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0))
 }

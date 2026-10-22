@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use egui::Pos2;
 use egui::Rect;
+use egui::Vec2;
 use egui_glow::winit::EguiGlow;
 use winit::dpi::PhysicalPosition;
 use winit::dpi::PhysicalSize;
@@ -18,7 +19,12 @@ use winit::window::WindowLevel;
 
 use crate::capture::CapturedMonitor;
 use crate::graphics::GlWindow;
+use selection::HitArea;
+use selection::MIN_SELECTION;
 use selection::Selection;
+
+/// 控制点半径（逻辑点）。
+const HANDLE_R_PT: f32 = 4.0;
 
 /// 覆盖层状态机。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,6 +34,13 @@ pub enum State {
     Selected,
     Annotating,
     Done,
+}
+
+/// 当前拖拽类型（物理像素空间）。
+#[derive(Debug, Clone, Copy)]
+pub enum Drag {
+    Resize(HitArea),
+    Move { offset: Vec2 },
 }
 
 /// 单个覆盖层窗口的可变 UI 状态。
@@ -40,6 +53,8 @@ pub struct OverlayState {
     pub selection: Option<Selection>,
     /// 拖拽起点（物理像素）。
     pub anchor: Option<Pos2>,
+    /// 当前缩放/平移拖拽。
+    pub drag: Option<Drag>,
     pub close_requested: bool,
 }
 
@@ -76,9 +91,12 @@ impl OverlayState {
             render::draw_mask(&painter, tex, screen_rect, sel_pts);
         }
 
-        // 4) 选区边框
+        // 4) 选区边框 + 控制点
         if let Some(sel_pts) = sel_pts {
             render::draw_border(&painter, sel_pts);
+            if self.state == State::Selected {
+                render::draw_handles(&painter, sel_pts, HANDLE_R_PT);
+            }
         }
 
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -87,28 +105,36 @@ impl OverlayState {
     }
 
     fn handle_input(&mut self, ctx: &egui::Context) {
-        let (primary_pressed, primary_released, secondary_pressed, pointer) = ctx.input(|i| {
-            (
-                i.pointer.primary_pressed(),
-                i.pointer.primary_released(),
-                i.pointer.secondary_pressed(),
-                i.pointer.latest_pos(),
-            )
-        });
+        let (primary_pressed, primary_released, primary_down, secondary_pressed, pointer) = ctx
+            .input(|i| {
+                (
+                    i.pointer.primary_pressed(),
+                    i.pointer.primary_released(),
+                    i.pointer.primary_down(),
+                    i.pointer.secondary_pressed(),
+                    i.pointer.latest_pos(),
+                )
+            });
 
         // 指针逻辑点 → 物理像素，并钳制在截图范围内
         let image_size = self.screen.image.dimensions();
+        let bounds = Rect::from_min_size(
+            Pos2::ZERO,
+            Vec2::new(image_size.0 as f32, image_size.1 as f32),
+        );
         let pos = pointer.map(|p| {
             egui::pos2(
                 (p.x * self.scale).clamp(0.0, image_size.0 as f32),
                 (p.y * self.scale).clamp(0.0, image_size.1 as f32),
             )
         });
+        let handle_r = HANDLE_R_PT * self.scale;
 
         // 右键：取消当前选区
         if secondary_pressed {
             self.selection = None;
             self.anchor = None;
+            self.drag = None;
             self.state = State::Idle;
             return;
         }
@@ -129,12 +155,38 @@ impl OverlayState {
                 }
             }
             State::Selected => {
-                // 里程碑 3 会替换为命中测试；当前点击空白处重新框选
                 if primary_pressed {
-                    if let Some(p) = pos {
-                        self.anchor = Some(p);
-                        self.selection = Some(Selection::new(p, p));
-                        self.state = State::Selecting;
+                    if let (Some(p), Some(sel)) = (pos, self.selection) {
+                        match sel.hit_test(p, handle_r) {
+                            HitArea::Move => {
+                                self.drag = Some(Drag::Move {
+                                    offset: p - sel.rect.min,
+                                });
+                            }
+                            HitArea::None => {
+                                // 选区外按下：重新框选
+                                self.anchor = Some(p);
+                                self.selection = Some(Selection::new(p, p));
+                                self.state = State::Selecting;
+                            }
+                            hit => {
+                                self.drag = Some(Drag::Resize(hit));
+                            }
+                        }
+                    }
+                }
+
+                if primary_down {
+                    if let (Some(drag), Some(p), Some(sel)) =
+                        (self.drag, pos, self.selection.as_mut())
+                    {
+                        match drag {
+                            Drag::Resize(hit) => sel.resize(hit, p, MIN_SELECTION, bounds),
+                            Drag::Move { offset } => {
+                                let delta = (p - offset) - sel.rect.min;
+                                sel.move_by(delta, bounds);
+                            }
+                        }
                     }
                 }
             }
@@ -151,6 +203,10 @@ impl OverlayState {
                 self.state = State::Idle;
             }
             self.anchor = None;
+        }
+
+        if primary_released {
+            self.drag = None;
         }
     }
 
@@ -213,6 +269,7 @@ impl Overlay {
             state: State::Idle,
             selection: None,
             anchor: None,
+            drag: None,
             close_requested: false,
         };
 
