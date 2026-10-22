@@ -82,6 +82,27 @@ pub fn draw_handles(painter: &Painter, selection: Rect, radius: f32) {
     }
 }
 
+/// 在选区左上角附近绘制尺寸标签（如 `1980 x 1080px`）。
+pub fn draw_size_label(painter: &Painter, selection: Rect, screen_rect: Rect, text: &str) {
+    let font = egui::FontId::proportional(14.0);
+    let galley = painter.layout_no_wrap(text.to_owned(), font, Color32::WHITE);
+    let pad = egui::vec2(8.0, 4.0);
+    let bg_size = galley.size() + pad * 2.0;
+
+    // 默认放在左上角上方；顶部空间不足则放到选区内部
+    let mut min = Pos2::new(selection.min.x, selection.min.y - bg_size.y - 4.0);
+    if min.y < screen_rect.min.y + 2.0 {
+        min = Pos2::new(selection.min.x + 4.0, selection.min.y + 4.0);
+    }
+    let max_x = (screen_rect.max.x - bg_size.x - 2.0).max(screen_rect.min.x + 2.0);
+    min.x = min.x.clamp(screen_rect.min.x + 2.0, max_x);
+    min.y = min.y.max(screen_rect.min.y + 2.0);
+
+    let bg = Rect::from_min_size(min, bg_size);
+    painter.rect_filled(bg, 3.0, Color32::from_black_alpha(190));
+    painter.galley(bg.min + pad, galley, Color32::WHITE);
+}
+
 fn full_uv() -> Rect {
     Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0))
 }

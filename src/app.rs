@@ -43,6 +43,8 @@ pub struct App {
     proxy: EventLoopProxy<UserEvent>,
     overlays: HashMap<WindowId, Overlay>,
     pins: HashMap<WindowId, PinWindow>,
+    /// 鼠标所在的「活动」覆盖层（亮），其余覆盖层暗。
+    active_overlay: Option<WindowId>,
     capturing: bool,
     started: bool,
     /// 延迟退出时刻（一次性模式：留出剪贴板管理器抓取内容的时间）。
@@ -62,6 +64,7 @@ impl App {
             proxy,
             overlays: HashMap::new(),
             pins: HashMap::new(),
+            active_overlay: None,
             capturing: false,
             started: false,
             exit_deadline: None,
@@ -89,26 +92,18 @@ impl App {
         });
     }
 
-    fn open_overlays(&mut self, event_loop: &ActiveEventLoop, mut screens: Vec<CapturedMonitor>) {
+    fn open_overlays(&mut self, event_loop: &ActiveEventLoop, screens: Vec<CapturedMonitor>) {
         self.capturing = false;
-
-        // Wayland 无法绝对定位窗口：每屏一窗退化为单窗（取主显示器）
-        if platform::is_wayland() && screens.len() > 1 {
-            let primary = screens
-                .iter()
-                .position(|s| s.monitor.is_primary)
-                .unwrap_or(0);
-            let single = screens.swap_remove(primary);
-            screens = vec![single];
-            log::info!("Wayland: 多显示器降级为单窗口模式");
-        }
 
         for screen in screens {
             log::info!(
-                "overlay: monitor {} {}x{} @ scale {}",
+                "overlay: monitor {} ({}) {}x{} @ ({},{}) scale {}",
                 screen.monitor.id,
+                screen.monitor.name,
                 screen.monitor.width,
                 screen.monitor.height,
+                screen.monitor.x,
+                screen.monitor.y,
                 screen.monitor.scale_factor
             );
             match Overlay::create(event_loop, screen, self.proxy.clone()) {
@@ -120,9 +115,44 @@ impl App {
             }
         }
 
+        // 初始活动屏：默认主显示器；鼠标进入其他屏幕后会立即切换。
+        let initial = self
+            .overlays
+            .values()
+            .find(|o| o.is_primary())
+            .map(|o| o.window_id())
+            .or_else(|| self.overlays.keys().next().copied());
+        self.set_active_window(initial);
+
         if !self.resident && self.overlays.is_empty() && self.pins.is_empty() {
             self.schedule_exit(event_loop);
         }
+    }
+
+    /// 切换活动覆盖层：活动层亮，其余暗。
+    fn set_active_window(&mut self, active: Option<WindowId>) {
+        if self.active_overlay == active {
+            return;
+        }
+        self.active_overlay = active;
+        for (id, overlay) in self.overlays.iter_mut() {
+            overlay.set_active(Some(*id) == active);
+            overlay.request_redraw();
+        }
+    }
+
+    /// 鼠标进入某覆盖层时切换活动屏；拖拽中不切换，避免中断操作。
+    fn maybe_activate(&mut self, window_id: WindowId) {
+        if self.active_overlay == Some(window_id) {
+            return;
+        }
+        if let Some(active) = self.active_overlay {
+            if self.overlays.get(&active).is_some_and(|o| o.is_dragging()) {
+                return;
+            }
+        }
+        log::debug!("active overlay -> {:?}", window_id);
+        self.set_active_window(Some(window_id));
     }
 
     /// 一次性模式退出前稍作延迟，给剪贴板管理器抓取内容的时间
@@ -245,11 +275,23 @@ impl ApplicationHandler<UserEvent> for App {
         window_id: WindowId,
         event: WindowEvent,
     ) {
-        if let Some(overlay) = self.overlays.get_mut(&window_id) {
+        if self.overlays.contains_key(&window_id) {
+            // 鼠标进入/在屏幕上移动时，将其设为活动屏（亮），其余变暗
+            if matches!(
+                event,
+                WindowEvent::CursorEntered { .. } | WindowEvent::CursorMoved { .. }
+            ) {
+                self.maybe_activate(window_id);
+            }
+
+            let Some(overlay) = self.overlays.get_mut(&window_id) else {
+                return;
+            };
             let close = overlay.handle_window_event(event_loop, &event);
             if close {
                 // Esc / 动作完成对整个截图会话生效：关闭所有屏幕的覆盖层
                 self.overlays.clear();
+                self.active_overlay = None;
                 if !self.resident && self.pins.is_empty() {
                     self.schedule_exit(event_loop);
                 }

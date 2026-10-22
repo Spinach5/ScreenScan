@@ -11,6 +11,7 @@ use winit::dpi::PhysicalSize;
 use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
 use winit::event_loop::EventLoopProxy;
+use winit::window::Fullscreen;
 use winit::window::WindowAttributes;
 use winit::window::WindowId;
 use winit::window::WindowLevel;
@@ -36,6 +37,8 @@ use selection::Selection;
 const HANDLE_R_PT: f32 = 4.0;
 /// 橡皮擦默认线宽（逻辑点）。
 const DEFAULT_WIDTH: f32 = 3.0;
+/// 判定「单击」而非「拖动」的位移阈值（物理像素）。
+const DRAG_THRESHOLD: f32 = 4.0;
 
 /// 覆盖层状态机。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,10 +63,14 @@ pub struct OverlayState {
     pub texture: Option<egui::TextureHandle>,
     pub scale: f32,
     pub state: State,
+    /// 是否为鼠标所在的「活动」显示器（亮）；否则整屏变暗。
+    pub active: bool,
     /// 选区（物理像素）。
     pub selection: Option<Selection>,
     /// 拖拽起点（物理像素）。
     pub anchor: Option<Pos2>,
+    /// 本次按下后是否已产生有效拖动（用于区分单击/拖动）。
+    pub drag_moved: bool,
     /// 当前缩放/平移拖拽。
     pub drag: Option<Drag>,
     /// 标注笔画列表 + 撤销/重做。
@@ -111,6 +118,15 @@ impl OverlayState {
             render::draw_screenshot(&painter, tex, screen_rect);
         }
 
+        // 非活动显示器：整屏暗色蒙层，不显示选区/工具栏/尺寸
+        if !self.active {
+            painter.rect_filled(screen_rect, 0.0, render::DIM);
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.close_requested = true;
+            }
+            return;
+        }
+
         // 2) 工具栏（叠加在同一视口，foreground 层）
         let mut action = toolbar::ToolbarAction::default();
         if let Some(sel_pts) = self.selection.map(|s| self.physical_rect_to_points(s.rect)) {
@@ -144,11 +160,19 @@ impl OverlayState {
             render::draw_mask(&painter, tex, screen_rect, sel_pts);
         }
 
-        // 5) 选区边框 + 控制点 + 标注
+        // 5) 选区边框 + 控制点 + 尺寸标签 + 标注
         if let Some(sel_pts) = sel_pts {
             render::draw_border(&painter, sel_pts);
             if self.state == State::Selected {
                 render::draw_handles(&painter, sel_pts, HANDLE_R_PT);
+            }
+            if let Some(selection) = self.selection {
+                let label = format!(
+                    "{} x {}px",
+                    selection.rect.width().round() as u32,
+                    selection.rect.height().round() as u32
+                );
+                render::draw_size_label(&painter, sel_pts, screen_rect, &label);
             }
             annotate_render::draw_strokes(&painter, &self.board.strokes, sel_pts);
             if let Some(drawing) = &self.drawing {
@@ -339,15 +363,12 @@ impl OverlayState {
         });
         let handle_r = HANDLE_R_PT * self.scale;
 
-        // 右键：绘制中撤销上一笔；其余取消选区
+        // 右键：绘制中撤销上一笔；其余恢复默认全屏选区
         if secondary_pressed {
             if self.state == State::Annotating {
                 self.board.undo();
             } else {
-                self.selection = None;
-                self.anchor = None;
-                self.drag = None;
-                self.state = State::Idle;
+                self.reset_to_default();
             }
             return;
         }
@@ -356,15 +377,18 @@ impl OverlayState {
             State::Idle => {
                 if primary_pressed {
                     if let Some(p) = pos {
-                        self.anchor = Some(p);
-                        self.selection = Some(Selection::new(p, p));
-                        self.state = State::Selecting;
+                        self.begin_press(p);
                     }
                 }
             }
             State::Selecting => {
                 if let (Some(anchor), Some(p)) = (self.anchor, pos) {
-                    self.selection = Some(Selection::new(anchor, p));
+                    if (p - anchor).length() > DRAG_THRESHOLD {
+                        self.drag_moved = true;
+                    }
+                    if self.drag_moved {
+                        self.selection = Some(Selection::new(anchor, p));
+                    }
                 }
             }
             State::Annotating => {
@@ -380,10 +404,8 @@ impl OverlayState {
                                 });
                             }
                             HitArea::None => {
-                                // 选区外按下：重新框选
-                                self.anchor = Some(p);
-                                self.selection = Some(Selection::new(p, p));
-                                self.state = State::Selecting;
+                                // 选区外按下：准备重新拖选；仅单击则保持当前选区
+                                self.begin_press(p);
                             }
                             hit => {
                                 self.drag = Some(Drag::Resize(hit));
@@ -405,25 +427,62 @@ impl OverlayState {
                         }
                     }
                 }
+
+                if primary_released {
+                    self.drag = None;
+                }
             }
             _ => {}
         }
 
-        // 释放统一在此收尾，兼容「按下与释放落在同一帧」的快速点击
+        // 选区收尾（兼容按下与释放落在同一帧的快速单击）：
+        // - 拖动过：松开即确认（方案 1）
+        // - 未拖动：确认为默认全屏 / 当前选区
         if self.state == State::Selecting && primary_released {
-            let valid = self.selection.is_some_and(|s| s.is_valid());
-            if valid {
-                self.state = State::Selected;
+            if self.drag_moved {
+                if self.selection.is_some_and(|s| s.is_valid()) {
+                    self.state = State::Selected;
+                } else {
+                    self.reset_to_default();
+                }
             } else {
-                self.selection = None;
-                self.state = State::Idle;
+                if self.selection.is_none() {
+                    self.selection = Some(self.default_selection());
+                }
+                self.state = State::Selected;
             }
             self.anchor = None;
+            self.drag_moved = false;
         }
+    }
 
-        if primary_released {
-            self.drag = None;
+    fn begin_press(&mut self, pos: Pos2) {
+        self.anchor = Some(pos);
+        self.drag = None;
+        self.drag_moved = false;
+        self.state = State::Selecting;
+    }
+
+    /// 覆盖本显示器全屏的默认选区（物理像素）。
+    fn default_selection(&self) -> Selection {
+        let (w, h) = self.screen.image.dimensions();
+        Selection {
+            rect: Rect::from_min_max(Pos2::ZERO, Pos2::new(w as f32, h as f32)),
         }
+    }
+
+    fn reset_to_default(&mut self) {
+        self.selection = Some(self.default_selection());
+        self.anchor = None;
+        self.drag = None;
+        self.drag_moved = false;
+        self.drawing = None;
+        self.erased_accum.clear();
+        self.state = State::Idle;
+    }
+
+    pub fn is_dragging(&self) -> bool {
+        self.state == State::Selecting || self.drag.is_some() || self.drawing.is_some()
     }
 
     /// 绘制状态下的输入处理。`pointer` 为逻辑点（笔画坐标空间）。
@@ -497,6 +556,9 @@ impl OverlayState {
 pub struct Overlay {
     rendered: RenderedWindow,
     state: OverlayState,
+    /// 首帧后是否已向目标显示器发起全屏请求。
+    placed: bool,
+    target_monitor: Option<winit::monitor::MonitorHandle>,
 }
 
 impl Overlay {
@@ -505,28 +567,62 @@ impl Overlay {
         screen: CapturedMonitor,
         proxy: EventLoopProxy<UserEvent>,
     ) -> anyhow::Result<Self> {
-        let attributes = WindowAttributes::default()
+        // 按名称（优先）或位置/尺寸匹配 winit 显示器，使用「按显示器全屏」
+        // 让覆盖层精确铺满对应屏幕（Wayland 无法绝对定位时同样有效）。
+        let name = screen.monitor.name.clone();
+        let want = (
+            screen.monitor.x,
+            screen.monitor.y,
+            screen.monitor.width,
+            screen.monitor.height,
+        );
+        let handle = event_loop
+            .available_monitors()
+            .find(|m| m.name().as_deref() == Some(name.as_str()))
+            .or_else(|| {
+                event_loop.available_monitors().find(|m| {
+                    m.position().x == want.0
+                        && m.position().y == want.1
+                        && m.size().width == want.2
+                        && m.size().height == want.3
+                })
+            });
+
+        let base = WindowAttributes::default()
             .with_title("ScreenScan")
             .with_decorations(false)
             .with_resizable(false)
             .with_visible(false)
-            .with_window_level(WindowLevel::AlwaysOnTop)
-            .with_position(PhysicalPosition::new(screen.monitor.x, screen.monitor.y))
-            .with_inner_size(PhysicalSize::new(
-                screen.monitor.width,
-                screen.monitor.height,
-            ));
+            .with_window_level(WindowLevel::AlwaysOnTop);
+        let attributes = match &handle {
+            Some(monitor) => {
+                base.with_fullscreen(Some(Fullscreen::Borderless(Some(monitor.clone()))))
+            }
+            None => base
+                .with_position(PhysicalPosition::new(screen.monitor.x, screen.monitor.y))
+                .with_inner_size(PhysicalSize::new(
+                    screen.monitor.width,
+                    screen.monitor.height,
+                )),
+        };
 
         let rendered = unsafe { RenderedWindow::create(event_loop, attributes)? };
         let scale = rendered.scale();
+
+        let (iw, ih) = screen.image.dimensions();
+        let default_selection = Selection {
+            rect: Rect::from_min_max(Pos2::ZERO, Pos2::new(iw as f32, ih as f32)),
+        };
 
         let state = OverlayState {
             screen,
             texture: None,
             scale,
             state: State::Idle,
-            selection: None,
+            active: false,
+            selection: Some(default_selection),
             anchor: None,
+            drag_moved: false,
             drag: None,
             board: AnnotationBoard::default(),
             tool_kind: ToolKind::Brush,
@@ -542,10 +638,21 @@ impl Overlay {
         };
 
         rendered.window().set_visible(true);
+        // 部分 Wayland 合成器需在窗口映射后再请求「按显示器全屏」。
+        if let Some(monitor) = &handle {
+            rendered
+                .window()
+                .set_fullscreen(Some(Fullscreen::Borderless(Some(monitor.clone()))));
+        }
         rendered.window().focus_window();
         rendered.window().request_redraw();
 
-        Ok(Self { rendered, state })
+        Ok(Self {
+            rendered,
+            state,
+            placed: false,
+            target_monitor: handle,
+        })
     }
 
     pub fn window_id(&self) -> WindowId {
@@ -554,6 +661,18 @@ impl Overlay {
 
     pub fn request_redraw(&self) {
         self.rendered.window().request_redraw();
+    }
+
+    pub fn set_active(&mut self, active: bool) {
+        self.state.active = active;
+    }
+
+    pub fn is_primary(&self) -> bool {
+        self.state.screen.monitor.is_primary
+    }
+
+    pub fn is_dragging(&self) -> bool {
+        self.state.is_dragging()
     }
 
     pub fn set_scan_result(&mut self, result: Result<String, String>) {
@@ -595,5 +714,21 @@ impl Overlay {
     fn redraw(&mut self) {
         self.rendered.render(|ui| self.state.ui(ui));
         self.rendered.window().set_visible(true);
+
+        if !self.placed {
+            self.placed = true;
+            // 首帧缓冲区已提交（surface 已映射），此时再按目标输出全屏，
+            // 部分 Wayland 合成器（如 Mutter）才会真正把窗口放到指定显示器。
+            if let Some(monitor) = &self.target_monitor {
+                self.rendered
+                    .window()
+                    .set_fullscreen(Some(Fullscreen::Borderless(Some(monitor.clone()))));
+            }
+            log::debug!(
+                "overlay[{}] inner={:?}",
+                self.state.screen.monitor.name,
+                self.rendered.window().inner_size()
+            );
+        }
     }
 }

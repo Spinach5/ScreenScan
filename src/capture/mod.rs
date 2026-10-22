@@ -5,6 +5,7 @@ use xcap::Monitor;
 #[derive(Debug, Clone)]
 pub struct MonitorInfo {
     pub id: u32,
+    pub name: String,
     pub x: i32,
     pub y: i32,
     pub width: u32,
@@ -26,6 +27,7 @@ pub fn list_monitors() -> anyhow::Result<Vec<MonitorInfo>> {
         .map(|m| {
             Ok(MonitorInfo {
                 id: m.id().map_err(|e| anyhow::anyhow!("{e}"))?,
+                name: m.name().unwrap_or_default(),
                 x: m.x().map_err(|e| anyhow::anyhow!("{e}"))?,
                 y: m.y().map_err(|e| anyhow::anyhow!("{e}"))?,
                 width: m.width().map_err(|e| anyhow::anyhow!("{e}"))?,
