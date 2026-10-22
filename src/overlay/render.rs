@@ -1,0 +1,121 @@
+//! 覆盖层渲染：冻结截图 + 暗色蒙层 + 选区挖空 + 边框。
+
+use egui::Color32;
+use egui::Painter;
+use egui::Pos2;
+use egui::Rect;
+use egui::Stroke;
+use egui::StrokeKind;
+use egui::TextureId;
+
+/// 蒙层颜色（半透明黑）。
+pub const DIM: Color32 = Color32::from_black_alpha(140);
+/// 选区边框颜色。
+const BORDER: Color32 = Color32::WHITE;
+
+/// 全窗铺满冻结截图。
+pub fn draw_screenshot(painter: &Painter, tex: TextureId, screen_rect: Rect) {
+    painter.image(tex, screen_rect, full_uv(), Color32::WHITE);
+}
+
+/// 绘制蒙层：选区外变暗，选区内贴回原图（挖空）。
+///
+/// `selection` 为逻辑点坐标（与 `screen_rect` 同空间）。
+pub fn draw_mask(painter: &Painter, tex: TextureId, screen_rect: Rect, selection: Option<Rect>) {
+    let Some(sel) = selection else {
+        painter.rect_filled(screen_rect, 0.0, DIM);
+        return;
+    };
+
+    // 1) 选区四周的暗色矩形
+    painter.rect_filled(
+        Rect::from_min_max(screen_rect.min, Pos2::new(screen_rect.max.x, sel.min.y)),
+        0.0,
+        DIM,
+    );
+    painter.rect_filled(
+        Rect::from_min_max(Pos2::new(screen_rect.min.x, sel.max.y), screen_rect.max),
+        0.0,
+        DIM,
+    );
+    painter.rect_filled(
+        Rect::from_min_max(
+            Pos2::new(screen_rect.min.x, sel.min.y),
+            Pos2::new(sel.min.x, sel.max.y),
+        ),
+        0.0,
+        DIM,
+    );
+    painter.rect_filled(
+        Rect::from_min_max(
+            Pos2::new(sel.max.x, sel.min.y),
+            Pos2::new(screen_rect.max.x, sel.max.y),
+        ),
+        0.0,
+        DIM,
+    );
+
+    // 2) 选区贴回原图：uv 裁剪
+    painter.image(tex, sel, uv_for(sel, screen_rect), Color32::WHITE);
+}
+
+/// 绘制选区边框。
+pub fn draw_border(painter: &Painter, selection: Rect) {
+    painter.rect_stroke(selection, 0.0, Stroke::new(1.0, BORDER), StrokeKind::Inside);
+}
+
+/// 绘制 8 个控制点（四角 + 四边中点）。
+pub fn draw_handles(painter: &Painter, selection: Rect, radius: f32) {
+    let handles = [
+        selection.left_top(),
+        selection.center_top(),
+        selection.right_top(),
+        selection.left_center(),
+        selection.right_center(),
+        selection.left_bottom(),
+        selection.center_bottom(),
+        selection.right_bottom(),
+    ];
+    for p in handles {
+        painter.circle_filled(p, radius, Color32::WHITE);
+        painter.circle_stroke(p, radius, Stroke::new(1.0, Color32::BLACK));
+    }
+}
+
+/// 在选区左上角附近绘制尺寸标签（如 `1980 x 1080px`）。
+pub fn draw_size_label(painter: &Painter, selection: Rect, screen_rect: Rect, text: &str) {
+    let font = egui::FontId::proportional(14.0);
+    let galley = painter.layout_no_wrap(text.to_owned(), font, Color32::WHITE);
+    let pad = egui::vec2(8.0, 4.0);
+    let bg_size = galley.size() + pad * 2.0;
+
+    // 默认放在左上角上方；顶部空间不足则放到选区内部
+    let mut min = Pos2::new(selection.min.x, selection.min.y - bg_size.y - 4.0);
+    if min.y < screen_rect.min.y + 2.0 {
+        min = Pos2::new(selection.min.x + 4.0, selection.min.y + 4.0);
+    }
+    let max_x = (screen_rect.max.x - bg_size.x - 2.0).max(screen_rect.min.x + 2.0);
+    min.x = min.x.clamp(screen_rect.min.x + 2.0, max_x);
+    min.y = min.y.max(screen_rect.min.y + 2.0);
+
+    let bg = Rect::from_min_size(min, bg_size);
+    painter.rect_filled(bg, 3.0, Color32::from_black_alpha(190));
+    painter.galley(bg.min + pad, galley, Color32::WHITE);
+}
+
+fn full_uv() -> Rect {
+    Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0))
+}
+
+/// 将屏幕内子矩形换算为纹理 uv（冻结截图铺满 `screen_rect`）。
+fn uv_for(sel: Rect, screen: Rect) -> Rect {
+    let min = Pos2::new(
+        (sel.min.x - screen.min.x) / screen.width(),
+        (sel.min.y - screen.min.y) / screen.height(),
+    );
+    let max = Pos2::new(
+        (sel.max.x - screen.min.x) / screen.width(),
+        (sel.max.y - screen.min.y) / screen.height(),
+    );
+    Rect::from_min_max(min, max)
+}
