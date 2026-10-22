@@ -35,7 +35,7 @@ pub fn show(
     ctx: &egui::Context,
     selection: Rect,
     screen_rect: Rect,
-    tool_kind: ToolKind,
+    active_kind: Option<ToolKind>,
     color: Color32,
     width: f32,
     can_undo: bool,
@@ -53,9 +53,9 @@ pub fn show(
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    tool_button(ui, &mut action, tool_kind, ToolKind::Brush);
-                    tool_button(ui, &mut action, tool_kind, ToolKind::Scribble);
-                    tool_button(ui, &mut action, tool_kind, ToolKind::Eraser);
+                    tool_button(ui, &mut action, active_kind, ToolKind::Brush);
+                    tool_button(ui, &mut action, active_kind, ToolKind::Scribble);
+                    tool_button(ui, &mut action, active_kind, ToolKind::Eraser);
 
                     ui.separator();
 
@@ -105,9 +105,14 @@ pub fn show(
     action
 }
 
-fn tool_button(ui: &mut egui::Ui, action: &mut ToolbarAction, current: ToolKind, target: ToolKind) {
+fn tool_button(
+    ui: &mut egui::Ui,
+    action: &mut ToolbarAction,
+    current: Option<ToolKind>,
+    target: ToolKind,
+) {
     if ui
-        .selectable_label(current == target, target.label())
+        .selectable_label(current == Some(target), target.label())
         .clicked()
     {
         action.set_kind = Some(target);

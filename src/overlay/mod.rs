@@ -136,7 +136,7 @@ impl OverlayState {
                     &ctx,
                     sel_pts,
                     screen_rect,
-                    self.tool_kind,
+                    (self.state == State::Annotating).then_some(self.tool_kind),
                     self.color,
                     self.width,
                     self.board.can_undo(),
@@ -212,10 +212,17 @@ impl OverlayState {
 
     fn apply_toolbar(&mut self, action: toolbar::ToolbarAction) {
         if let Some(kind) = action.set_kind {
-            self.tool_kind = kind;
-            self.state = State::Annotating;
-            self.drag = None;
-            self.drawing = None;
+            // 再次点击当前工具：退出绘画模式，回到选区调整（鼠标）模式。
+            if self.state == State::Annotating && self.tool_kind == kind {
+                self.state = State::Selected;
+                self.drag = None;
+                self.drawing = None;
+            } else {
+                self.tool_kind = kind;
+                self.state = State::Annotating;
+                self.drag = None;
+                self.drawing = None;
+            }
         }
         if let Some(color) = action.set_color {
             self.color = color;
