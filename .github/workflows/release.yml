@@ -1,0 +1,300 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  meta:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.vars.outputs.version }}
+      app_version: ${{ steps.vars.outputs.app_version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: vars
+        name: Compute version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            base="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)"
+            if [[ -z "$base" ]]; then
+              echo "cannot read version from Cargo.toml" >&2
+              exit 1
+            fi
+            version="${base}.dev${GITHUB_SHA:0:7}"
+          fi
+          if [[ ! "$version" =~ ^[0-9] ]]; then
+            echo "invalid version derived from tag: $version (expected vX.Y.Z)" >&2
+            exit 1
+          fi
+          app_version="$(printf '%s' "$version" | grep -oE '^[0-9]+(\.[0-9]+)*' || true)"
+          {
+            echo "version=${version}"
+            echo "app_version=${app_version:-0.1.0}"
+          } >> "$GITHUB_OUTPUT"
+
+  build-linux:
+    name: Linux ${{ matrix.arch }}
+    needs: meta
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libpipewire-0.3-dev \
+            libgbm-dev \
+            libdrm-dev \
+            libegl1-mesa-dev \
+            libclang-dev \
+            libwayland-dev \
+            libxkbcommon-dev \
+            libxcb1-dev \
+            libxcb-randr0-dev \
+            libxcb-shm0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxcb-sync-dev \
+            libarchive-tools \
+            zstd \
+            librsvg2-bin
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-${{ matrix.arch }}
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Package
+        run: |
+          case "$ARCH" in
+            x86_64) NFPM_ARCH=x86_64 ;;
+            aarch64) NFPM_ARCH=arm64 ;;
+          esac
+          mkdir -p "$RUNNER_TEMP/nfpm"
+          curl -fsSL -o "$RUNNER_TEMP/nfpm/nfpm.tar.gz" \
+            "https://github.com/goreleaser/nfpm/releases/download/v2.48.0/nfpm_2.48.0_Linux_${NFPM_ARCH}.tar.gz"
+          tar -xzf "$RUNNER_TEMP/nfpm/nfpm.tar.gz" -C "$RUNNER_TEMP/nfpm" nfpm
+          export PATH="$RUNNER_TEMP/nfpm:$PATH"
+          bash packaging/linux/package.sh target/release/ScreenScan "$VERSION" "$ARCH" dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  build-windows:
+    name: Windows ${{ matrix.arch }}
+    needs: meta
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            arch: x86_64
+            target: x86_64-pc-windows-msvc
+          - runner: windows-11-arm
+            arch: arm64
+            target: aarch64-pc-windows-msvc
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-${{ matrix.arch }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $exe = "target/${{ matrix.target }}/release/ScreenScan.exe"
+          if (-not (Test-Path $exe)) { throw "missing $exe" }
+
+          $version = $env:VERSION
+          $arch = $env:ARCH
+          Compress-Archive -Path $exe -DestinationPath "dist/ScreenScan-$version-windows-$arch.zip" -Force
+
+          $payload = "build/nsis"
+          New-Item -ItemType Directory -Force $payload | Out-Null
+          Copy-Item $exe "$payload/ScreenScan.exe"
+          Copy-Item packaging/windows/installer.nsi "$payload/installer.nsi"
+
+          $candidates = @(
+            "C:\Program Files (x86)\NSIS\makensis.exe",
+            "C:\Program Files\NSIS\makensis.exe"
+          )
+          $makensis = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $makensis) {
+            choco install nsis -y --no-progress
+            $makensis = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          }
+          if (-not $makensis) { throw "makensis not found" }
+
+          Push-Location $payload
+          & $makensis "/DVERSION=$version" "/DARCH=$arch" "installer.nsi"
+          if ($LASTEXITCODE -ne 0) { throw "makensis failed with exit code $LASTEXITCODE" }
+          Pop-Location
+
+          Move-Item "$payload/ScreenScan-$version-windows-$arch-setup.exe" dist/
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  build-macos:
+    name: macOS ${{ matrix.arch }}
+    needs: meta
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            arch: x86_64
+            target: x86_64-apple-darwin
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      APP_VERSION: ${{ needs.meta.outputs.app_version }}
+      ARCH: ${{ matrix.arch }}
+      TARGET: ${{ matrix.target }}
+      MACOSX_DEPLOYMENT_TARGET: "12.3"
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-${{ matrix.arch }}
+
+      - name: Build
+        run: cargo build --release --locked --target "$TARGET"
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          APP="dist/ScreenScan.app"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp "target/$TARGET/release/ScreenScan" "$APP/Contents/MacOS/ScreenScan"
+          chmod +x "$APP/Contents/MacOS/ScreenScan"
+
+          cat > "$APP/Contents/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleDevelopmentRegion</key>
+            <string>zh_CN</string>
+            <key>CFBundleDisplayName</key>
+            <string>ScreenScan</string>
+            <key>CFBundleExecutable</key>
+            <string>ScreenScan</string>
+            <key>CFBundleIdentifier</key>
+            <string>com.spinach5.screenscan</string>
+            <key>CFBundleInfoDictionaryVersion</key>
+            <string>6.0</string>
+            <key>CFBundleName</key>
+            <string>ScreenScan</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>CFBundleShortVersionString</key>
+            <string>${APP_VERSION}</string>
+            <key>CFBundleVersion</key>
+            <string>${APP_VERSION}</string>
+            <key>LSMinimumSystemVersion</key>
+            <string>12.3</string>
+            <key>NSHighResolutionCapable</key>
+            <true/>
+            <key>NSScreenCaptureUsageDescription</key>
+            <string>ScreenScan 需要屏幕录制权限以捕获屏幕内容。</string>
+          </dict>
+          </plist>
+          EOF
+
+          codesign --force --sign - "$APP"
+          codesign --verify --strict "$APP"
+
+          ditto -c -k --sequesterRsrc --keepParent "$APP" \
+            "dist/ScreenScan-${VERSION}-macos-${ARCH}.zip"
+
+          mkdir -p dist/dmg
+          cp -R "$APP" dist/dmg/
+          ln -s /Applications dist/dmg/Applications
+          hdiutil create -volname "ScreenScan" -srcfolder dist/dmg -ov -format UDZO \
+            "dist/ScreenScan-${VERSION}-macos-${ARCH}.dmg"
+          rm -rf dist/dmg
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-${{ matrix.arch }}
+          path: |
+            dist/*.zip
+            dist/*.dmg
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-linux, build-windows, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          name: ScreenScan ${{ github.ref_name }}
+          files: dist/*
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}

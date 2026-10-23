@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=ScreenScan
+GenericName=Screenshot Tool
+Comment=Capture, annotate and pin screenshots
+Exec=screenscan
+Icon=screenscan
+Terminal=false
+Categories=Graphics;
+Keywords=screenshot;capture;annotate;pin;
+StartupNotify=false
