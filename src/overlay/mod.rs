@@ -93,6 +93,8 @@ pub struct OverlayState {
     pub scanning: bool,
     /// 回主线程的事件代理（贴图窗口创建等）。
     pub proxy: EventLoopProxy<UserEvent>,
+    /// 保存文件名模板（来自设置）。
+    pub filename_template: String,
 }
 
 impl OverlayState {
@@ -349,7 +351,10 @@ impl OverlayState {
         let outcome = if is_copy {
             actions::copy(&composed)
         } else {
-            actions::save(&composed)
+            actions::save(
+                &composed,
+                &crate::config::format_filename(&self.filename_template),
+            )
         };
 
         match outcome {
@@ -601,6 +606,7 @@ impl Overlay {
         event_loop: &ActiveEventLoop,
         screen: CapturedMonitor,
         proxy: EventLoopProxy<UserEvent>,
+        filename_template: String,
     ) -> anyhow::Result<Self> {
         // 按名称（优先）或位置/尺寸匹配 winit 显示器，使用「按显示器全屏」
         // 让覆盖层精确铺满对应屏幕（Wayland 无法绝对定位时同样有效）。
@@ -681,6 +687,7 @@ impl Overlay {
             status: None,
             scanning: false,
             proxy,
+            filename_template,
         };
 
         // X11：首帧画好后再显示窗口，避免启动黑屏/闪烁。

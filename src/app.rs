@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -16,11 +17,23 @@ use winit::event_loop::ControlFlow;
 use winit::event_loop::EventLoopProxy;
 use winit::window::WindowId;
 
+use crate::autostart;
 use crate::capture;
 use crate::capture::CapturedMonitor;
+use crate::config::ConfigStore;
+use crate::config::TrayIconSetting;
+use crate::font;
+use crate::font::FontEntry;
+use crate::history;
+use crate::i18n::t;
 use crate::overlay::Overlay;
 use crate::pin::PinWindow;
 use crate::platform;
+use crate::settings::Effect as SettingsEffect;
+use crate::settings::SettingsWindow;
+use crate::tray;
+use crate::tray::Tray;
+use crate::util;
 
 /// 跨线程送回主线程的事件。
 pub enum UserEvent {
@@ -37,6 +50,14 @@ pub enum UserEvent {
     CaptureFailed(String),
     /// 全局快捷键事件。
     Hotkey { id: u32, pressed: bool },
+    /// 托盘菜单点击（携带菜单项 id）。
+    TrayAction(String),
+    /// 系统字体扫描完成。
+    FontsScanned(Vec<FontEntry>),
+    /// 自定义托盘图标文件选择结果。
+    TrayIconChosen(Option<PathBuf>),
+    /// 配置文件目录选择结果。
+    ConfigDirChosen(Option<PathBuf>),
 }
 
 pub struct App {
@@ -58,10 +79,22 @@ pub struct App {
     hotkey_manager: Option<GlobalHotKeyManager>,
     capture_hotkey: Option<u32>,
     quit_hotkey: Option<u32>,
+    store: ConfigStore,
+    tray: Option<Tray>,
+    settings: Option<SettingsWindow>,
+    fonts: Vec<FontEntry>,
+    fonts_scanning: bool,
+    /// `--preferences`：启动后直接打开设置窗口。
+    show_settings_on_start: bool,
 }
 
 impl App {
-    pub fn new(proxy: EventLoopProxy<UserEvent>, one_shot: bool) -> Self {
+    pub fn new(
+        proxy: EventLoopProxy<UserEvent>,
+        one_shot: bool,
+        show_settings_on_start: bool,
+        store: ConfigStore,
+    ) -> Self {
         Self {
             proxy,
             overlays: HashMap::new(),
@@ -76,6 +109,12 @@ impl App {
             hotkey_manager: None,
             capture_hotkey: None,
             quit_hotkey: None,
+            store,
+            tray: None,
+            settings: None,
+            fonts: Vec::new(),
+            fonts_scanning: false,
+            show_settings_on_start,
         }
     }
 
@@ -97,6 +136,7 @@ impl App {
 
     fn open_overlays(&mut self, event_loop: &ActiveEventLoop, screens: Vec<CapturedMonitor>) {
         self.capturing = false;
+        let filename_template = self.store.config.effective_filename_format().to_owned();
 
         for screen in screens {
             log::info!(
@@ -109,7 +149,12 @@ impl App {
                 screen.monitor.y,
                 screen.monitor.scale_factor
             );
-            match Overlay::create(event_loop, screen, self.proxy.clone()) {
+            match Overlay::create(
+                event_loop,
+                screen,
+                self.proxy.clone(),
+                filename_template.clone(),
+            ) {
                 Ok(overlay) => {
                     let id = overlay.window_id();
                     self.overlays.insert(id, overlay);
@@ -198,6 +243,181 @@ impl App {
         }
     }
 
+    fn create_tray(&mut self) {
+        match Tray::new(
+            self.store.config.language,
+            &self.store.config.tray_icon,
+            self.proxy.clone(),
+        ) {
+            Ok(tray) => self.tray = Some(tray),
+            Err(e) => log::error!("创建托盘图标失败: {e}"),
+        }
+    }
+
+    fn open_settings(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(settings) = &self.settings {
+            settings.focus();
+            return;
+        }
+        match SettingsWindow::create(event_loop, self.store.config.language) {
+            Ok(settings) => self.settings = Some(settings),
+            Err(e) => log::error!("创建设置窗口失败: {e}"),
+        }
+    }
+
+    fn handle_tray_action(&mut self, action: &str, event_loop: &ActiveEventLoop) {
+        match action {
+            tray::ACTION_CAPTURE => self.trigger_capture(),
+            tray::ACTION_PIN => log::info!("贴图流程入口（预留）"),
+            tray::ACTION_CLEAR => {
+                let lang = self.store.config.language;
+                match history::clear() {
+                    Ok(()) => self.set_status(t(lang, "status.history_cleared").to_owned()),
+                    Err(e) => log::warn!("清空截图记录失败: {e}"),
+                }
+            }
+            tray::ACTION_PREFERENCES => self.open_settings(event_loop),
+            tray::ACTION_QUIT => event_loop.exit(),
+            other => log::warn!("未知托盘菜单项: {other}"),
+        }
+    }
+
+    fn set_status(&mut self, message: String) {
+        if let Some(settings) = &mut self.settings {
+            settings.set_status(message);
+            settings.request_redraw();
+        }
+    }
+
+    fn save_config(&mut self) {
+        if let Err(e) = self.store.save() {
+            let lang = self.store.config.language;
+            log::error!("保存配置失败: {e}");
+            self.set_status(format!("{}: {e}", t(lang, "status.save_failed")));
+        }
+    }
+
+    fn scan_fonts(&mut self) {
+        if self.fonts_scanning {
+            return;
+        }
+        self.fonts_scanning = true;
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let fonts = font::scan_system_fonts();
+            let _ = proxy.send_event(UserEvent::FontsScanned(fonts));
+        });
+        if let Some(settings) = &mut self.settings {
+            settings.request_redraw();
+        }
+    }
+
+    fn pick_tray_icon(&self) {
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let path = rfd::FileDialog::new()
+                .set_title("选择托盘图标")
+                .add_filter("Image", &["png", "jpg", "jpeg", "webp", "bmp", "gif"])
+                .pick_file();
+            let _ = proxy.send_event(UserEvent::TrayIconChosen(path));
+        });
+    }
+
+    fn pick_config_dir(&self) {
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let dir = rfd::FileDialog::new()
+                .set_title("选择配置文件存储位置")
+                .pick_folder();
+            let _ = proxy.send_event(UserEvent::ConfigDirChosen(dir));
+        });
+    }
+
+    fn apply_tray_icon(&mut self, setting: TrayIconSetting) {
+        let result = match &self.tray {
+            Some(tray) => tray.set_icon(&setting),
+            None => Ok(()),
+        };
+        let lang = self.store.config.language;
+        match result {
+            Ok(()) => {
+                self.store.config.tray_icon = setting;
+                if let Some(settings) = &mut self.settings {
+                    settings.invalidate_preview();
+                    settings.set_status(t(lang, "status.icon_updated"));
+                    settings.request_redraw();
+                }
+                self.save_config();
+            }
+            Err(e) => {
+                log::error!("更新托盘图标失败: {e}");
+                self.set_status(format!("{}: {e}", t(lang, "status.icon_failed")));
+            }
+        }
+    }
+
+    fn apply_settings_effects(&mut self, effects: Vec<SettingsEffect>) {
+        let mut save = false;
+        for effect in effects {
+            match effect {
+                SettingsEffect::Save => save = true,
+                SettingsEffect::ScanFonts => self.scan_fonts(),
+                SettingsEffect::FontSelected(choice) => {
+                    let lang = self.store.config.language;
+                    let valid = match &choice {
+                        None => true,
+                        Some(choice) => match std::fs::read(&choice.path) {
+                            Ok(_) => true,
+                            Err(e) => {
+                                log::warn!("读取字体失败 {}: {e}", choice.path.display());
+                                self.set_status(t(lang, "status.font_failed").to_owned());
+                                false
+                            }
+                        },
+                    };
+                    if valid {
+                        font::set_choice(choice.clone());
+                        self.store.config.font = choice;
+                        if let Some(settings) = &mut self.settings {
+                            settings.reinstall_fonts();
+                        }
+                        self.set_status(t(lang, "status.font_updated").to_owned());
+                        save = true;
+                    }
+                }
+                SettingsEffect::TrayIcon(setting) => self.apply_tray_icon(setting),
+                SettingsEffect::PickTrayIcon => self.pick_tray_icon(),
+                SettingsEffect::PickConfigDir => self.pick_config_dir(),
+                SettingsEffect::Language(lang) => {
+                    self.store.config.language = lang;
+                    if let Some(tray) = &mut self.tray {
+                        tray.set_language(lang);
+                    }
+                    if let Some(settings) = &mut self.settings {
+                        settings.set_language(lang);
+                    }
+                    save = true;
+                }
+                SettingsEffect::Autostart(enabled) => {
+                    let lang = self.store.config.language;
+                    if let Err(e) = autostart::set(enabled) {
+                        log::error!("设置开机启动失败: {e}");
+                        self.store.config.autostart = !enabled;
+                        self.set_status(format!("{}: {e}", t(lang, "status.autostart_failed")));
+                    }
+                    save = true;
+                }
+                SettingsEffect::LogLevel => {
+                    log::set_max_level(self.store.config.log_level.filter());
+                    save = true;
+                }
+            }
+        }
+        if save {
+            self.save_config();
+        }
+    }
+
     fn setup_hotkeys(&mut self, event_loop: &ActiveEventLoop) {
         if self.one_shot || platform::is_wayland() {
             log::info!(
@@ -257,8 +477,20 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
         self.started = true;
+
+        if self.one_shot {
+            self.setup_hotkeys(event_loop);
+            self.trigger_capture();
+            return;
+        }
+
+        // 无参数启动：不显示主窗口，直接驻留托盘。
+        self.resident = true;
+        self.create_tray();
         self.setup_hotkeys(event_loop);
-        self.trigger_capture();
+        if self.show_settings_on_start {
+            self.open_settings(event_loop);
+        }
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
@@ -289,6 +521,44 @@ impl ApplicationHandler<UserEvent> for App {
                     self.trigger_capture();
                 }
             }
+            UserEvent::TrayAction(action) => self.handle_tray_action(&action, event_loop),
+            UserEvent::FontsScanned(fonts) => {
+                self.fonts = fonts;
+                self.fonts_scanning = false;
+                if let Some(settings) = &mut self.settings {
+                    settings.request_redraw();
+                }
+            }
+            UserEvent::TrayIconChosen(Some(path)) => {
+                self.apply_tray_icon(TrayIconSetting::Custom(path));
+            }
+            UserEvent::TrayIconChosen(None) => {
+                if let Some(settings) = &mut self.settings {
+                    settings.request_redraw();
+                }
+            }
+            UserEvent::ConfigDirChosen(Some(dir)) => {
+                let lang = self.store.config.language;
+                match self.store.migrate_to_folder(&dir) {
+                    Ok(new_path) => {
+                        let display = util::path::display_path(&new_path);
+                        log::info!("配置文件已迁移到 {display}");
+                        self.set_status(format!("{} {display}", t(lang, "status.migrated")));
+                    }
+                    Err(e) => {
+                        log::error!("迁移配置文件失败: {e}");
+                        self.set_status(format!("{}: {e}", t(lang, "status.save_failed")));
+                    }
+                }
+                if let Some(settings) = &mut self.settings {
+                    settings.request_redraw();
+                }
+            }
+            UserEvent::ConfigDirChosen(None) => {
+                if let Some(settings) = &mut self.settings {
+                    settings.request_redraw();
+                }
+            }
         }
     }
 
@@ -298,6 +568,31 @@ impl ApplicationHandler<UserEvent> for App {
         window_id: WindowId,
         event: WindowEvent,
     ) {
+        if self
+            .settings
+            .as_ref()
+            .is_some_and(|settings| settings.window_id() == window_id)
+        {
+            if matches!(&event, WindowEvent::RedrawRequested) {
+                let display_path = self.store.display_path();
+                let fonts_scanning = self.fonts_scanning;
+                let fonts = &self.fonts;
+                let settings = self.settings.as_mut().expect("settings window exists");
+                let effects =
+                    settings.redraw(&mut self.store.config, &display_path, fonts, fonts_scanning);
+                self.apply_settings_effects(effects);
+            } else {
+                let close = self
+                    .settings
+                    .as_mut()
+                    .is_some_and(|settings| settings.handle_window_event(&event));
+                if close {
+                    self.settings = None;
+                }
+            }
+            return;
+        }
+
         if self.overlays.contains_key(&window_id) {
             // 用「指针真实坐标是否落在本窗口内」判定活动屏：
             // 窗口映射/全屏过程中可能收到伪造的 CursorEntered，其坐标会越界。

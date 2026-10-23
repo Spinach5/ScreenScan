@@ -27,6 +27,13 @@ arboard = { version = "3.7", features = ["image-data"] }
 # ── 文件对话框 ───────────────────────────
 rfd = { version = "0.17", features = ["xdg-portal"] }   # xdg-portal 供 Wayland 使用
 
+# ── 托盘 / 设置 / 字体 ───────────────────
+# Linux 使用纯 Rust 的 StatusNotifierItem 后端（ksni），避免依赖 GTK；
+# Windows / macOS 自动使用各自原生后端。
+tray-icon = { version = "0.26", default-features = false, features = ["ksni"] }
+chrono = "0.4"                            # 文件名时间占位符
+ttf-parser = "0.25"                       # 读取系统字体族名
+
 # ── 条码识别 ─────────────────────────────
 rxing = "0.9"
 

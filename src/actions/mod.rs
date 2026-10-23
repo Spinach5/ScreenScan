@@ -18,8 +18,8 @@ pub fn copy(rgba: &RgbaImage) -> ActionOutcome {
     copy::copy(rgba)
 }
 
-pub fn save(rgba: &RgbaImage) -> ActionOutcome {
-    save::save(rgba)
+pub fn save(rgba: &RgbaImage, default_name: &str) -> ActionOutcome {
+    save::save(rgba, default_name)
 }
 
 /// 把文本写入剪贴板（扫描结果用）。

@@ -204,6 +204,10 @@ impl RenderedWindow {
         self.gl.window().id()
     }
 
+    pub fn context(&self) -> &egui::Context {
+        &self.egui_glow.egui_ctx
+    }
+
     pub fn scale(&self) -> f32 {
         self.gl.window().scale_factor() as f32
     }
