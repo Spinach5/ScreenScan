@@ -36,6 +36,7 @@ pub enum Effect {
     Language(Language),
     Autostart(bool),
     LogLevel,
+    OpenLogDir,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -476,6 +477,23 @@ fn output_tab(ui: &mut egui::Ui, config: &mut Config, effects: &mut Vec<Effect>)
             effects.push(Effect::LogLevel);
         }
     });
+    ui.label(
+        RichText::new(t(lang, "output.log_level_hint"))
+            .small()
+            .weak(),
+    );
+
+    ui.add_space(10.0);
+    ui.horizontal(|ui| {
+        ui.label(t(lang, "output.log_file"));
+        ui.label(
+            RichText::new(crate::util::path::display_path(&crate::logging::log_dir())).monospace(),
+        );
+        if ui.button(t(lang, "output.open_log_folder")).clicked() {
+            effects.push(Effect::OpenLogDir);
+        }
+    });
+    ui.label(RichText::new(t(lang, "output.log_hint")).small().weak());
 
     ui.add_space(18.0);
     ui.label(RichText::new(t(lang, "output.filename")).strong());

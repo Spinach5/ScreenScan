@@ -125,6 +125,18 @@ pub fn t(lang: Language, key: &str) -> &'static str {
         (Language::En, "output.log_info") => "Normal",
         (Language::ZhCn, "output.log_error") => "错误",
         (Language::En, "output.log_error") => "Errors only",
+        (Language::ZhCn, "output.log_level_hint") => "日志级别同时作用于终端与日志文件",
+        (Language::En, "output.log_level_hint") => {
+            "The log level applies to both the terminal and log files"
+        }
+        (Language::ZhCn, "output.log_file") => "日志文件",
+        (Language::En, "output.log_file") => "Log files",
+        (Language::ZhCn, "output.open_log_folder") => "打开日志目录",
+        (Language::En, "output.open_log_folder") => "Open log folder",
+        (Language::ZhCn, "output.log_hint") => "按天写入，自动保留最近 14 天",
+        (Language::En, "output.log_hint") => {
+            "Written daily; the last 14 days are retained automatically"
+        }
         (Language::ZhCn, "output.filename") => "保存的文件名",
         (Language::En, "output.filename") => "Saved file name",
         (Language::ZhCn, "output.filename_hint") => {
@@ -179,6 +191,8 @@ pub fn t(lang: Language, key: &str) -> &'static str {
         (Language::En, "status.autostart_failed") => "Failed to update launch-at-login",
         (Language::ZhCn, "status.save_failed") => "设置保存失败",
         (Language::En, "status.save_failed") => "Failed to save settings",
+        (Language::ZhCn, "status.open_log_failed") => "无法打开日志目录",
+        (Language::En, "status.open_log_failed") => "Failed to open the log folder",
         (Language::ZhCn, "status.history_cleared") => "截图记录已清空",
         (Language::En, "status.history_cleared") => "Screenshot history cleared",
         (Language::ZhCn, "status.capture_placeholder") => "截图流程入口（预留）",

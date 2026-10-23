@@ -8,6 +8,7 @@ mod font;
 mod graphics;
 mod history;
 mod i18n;
+mod logging;
 mod overlay;
 mod pin;
 mod platform;
@@ -20,18 +21,32 @@ use winit::event_loop::EventLoop;
 
 use crate::app::{App, UserEvent};
 use crate::config::ConfigStore;
+use crate::util::path;
 
 fn main() -> anyhow::Result<()> {
     let mut store = ConfigStore::load();
-    init_logger(store.config.log_level);
+    logging::init(store.config.log_level);
+    install_panic_hook();
     font::set_choice(store.config.font.clone());
 
     // 首次启动落盘一份默认配置，便于用户直接编辑与备份。
-    if !store.path.is_file() {
-        if let Err(e) = store.save() {
-            log::warn!("初始化配置文件失败: {e}");
-        }
+    if !store.path.is_file()
+        && let Err(e) = store.save()
+    {
+        log::warn!("初始化配置文件失败: {e}");
     }
+
+    log::info!(
+        "ScreenScan {} 启动 ({} {})",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    );
+    if let Ok(exe) = std::env::current_exe() {
+        log::info!("可执行文件: {}", exe.display());
+    }
+    log::info!("配置文件: {}", store.display_path());
+    log::info!("日志目录: {}", path::display_path(&logging::log_dir()));
 
     let session = if platform::is_wayland() {
         "wayland"
@@ -66,15 +81,10 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn init_logger(level: config::LogLevel) {
-    env_logger::Builder::from_env(
-        env_logger::Env::default()
-            .default_filter_or("warn,ScreenScan=trace,libwayshot_xcap=off,zbus=warn,tracing=warn"),
-    )
-    .init();
-
-    // RUST_LOG 优先；否则由设置中的日志级别控制运行时最大级别。
-    if std::env::var_os("RUST_LOG").is_none() {
-        log::set_max_level(level.filter());
-    }
+fn install_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        log::error!("应用发生 panic: {info}");
+        previous(info);
+    }));
 }

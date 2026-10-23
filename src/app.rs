@@ -411,6 +411,13 @@ impl App {
                     log::set_max_level(self.store.config.log_level.filter());
                     save = true;
                 }
+                SettingsEffect::OpenLogDir => {
+                    if let Err(e) = crate::logging::open_log_dir() {
+                        let lang = self.store.config.language;
+                        log::warn!("打开日志目录失败: {e}");
+                        self.set_status(format!("{}: {e}", t(lang, "status.open_log_failed")));
+                    }
+                }
             }
         }
         if save {
