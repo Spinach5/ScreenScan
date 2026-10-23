@@ -172,8 +172,32 @@ pub fn t(lang: Language, key: &str) -> &'static str {
 
         (Language::ZhCn, "common.close") => "关闭",
         (Language::En, "common.close") => "Close",
+        (Language::ZhCn, "common.cancel") => "取消",
+        (Language::En, "common.cancel") => "Cancel",
         (Language::ZhCn, "common.apply_immediately") => "所有修改即时生效",
         (Language::En, "common.apply_immediately") => "All changes apply immediately",
+
+        (Language::ZhCn, "permission.title") => "允许 ScreenScan 截屏",
+        (Language::En, "permission.title") => "Allow ScreenScan to Capture",
+        (Language::ZhCn, "permission.body") => {
+            "系统需要你授权 ScreenScan 截取屏幕。完成一次授权后，即可直接从托盘截屏，无需再次确认。"
+        }
+        (Language::En, "permission.body") => {
+            "Your system needs permission for ScreenScan to capture the screen. \
+             After granting it once, you can capture directly from the tray."
+        }
+        (Language::ZhCn, "permission.hint") => "该权限可随时在系统设置的隐私页面中更改。",
+        (Language::En, "permission.hint") => {
+            "You can change this permission at any time in your system's privacy settings."
+        }
+        (Language::ZhCn, "permission.grant") => "授权并截屏",
+        (Language::En, "permission.grant") => "Allow and Capture",
+        (Language::ZhCn, "permission.pending") => "正在等待系统授权…",
+        (Language::En, "permission.pending") => "Waiting for system permission…",
+        (Language::ZhCn, "permission.failed") => "未获得截屏权限，请重试",
+        (Language::En, "permission.failed") => {
+            "Screenshot permission was not granted. Please try again."
+        }
 
         (Language::ZhCn, "status.saved") => "设置已保存",
         (Language::En, "status.saved") => "Settings saved",

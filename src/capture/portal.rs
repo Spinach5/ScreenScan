@@ -17,10 +17,14 @@ use zbus::zvariant::DeserializeDict;
 use zbus::zvariant::Type;
 use zbus::zvariant::Value;
 
+use crate::capture::CaptureFailure;
+
 #[derive(DeserializeDict, Type, Debug)]
 #[zvariant(signature = "dict")]
 struct ScreenshotResponse {
-    uri: String,
+    /// 失败时 results 为空字典，因此必须是 Option，否则会在检查响应码前先报
+    /// "missing field `uri`"，掩盖真正的失败原因。
+    uri: Option<String>,
 }
 
 /// 一次性抓取整个虚拟桌面（阻塞，应在后台线程调用）。
@@ -53,7 +57,10 @@ pub fn capture_desktop() -> anyhow::Result<RgbaImage> {
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let response = receiver.recv().map_err(|e| anyhow::anyhow!("{e}"))??;
-    let path = uri_to_path(&response.uri)?;
+    let uri = response
+        .uri
+        .ok_or_else(|| anyhow::anyhow!("portal screenshot response has no uri"))?;
+    let path = uri_to_path(&uri)?;
     let image = image::open(&path)
         .map_err(|e| anyhow::anyhow!("{e}"))?
         .to_rgba8();
@@ -103,8 +110,13 @@ where
     let (code, results): (u32, T) = body.deserialize().map_err(|e| anyhow::anyhow!("{e}"))?;
     match code {
         0 => Ok(results),
-        1 => Err(anyhow::anyhow!("portal screenshot cancelled")),
-        other => Err(anyhow::anyhow!("portal screenshot failed (code {other})")),
+        1 => Err(anyhow::Error::new(CaptureFailure::Cancelled)),
+        other => {
+            // 典型原因是系统授权对话框无法显示（请求方不是焦点应用），
+            // 由上层引导用户完成一次授权后重试。
+            log::warn!("portal screenshot failed (response code {other})");
+            Err(anyhow::Error::new(CaptureFailure::PermissionDenied))
+        }
     }
 }
 
@@ -139,5 +151,41 @@ fn hex_val(b: u8) -> Option<u8> {
         b'a'..=b'f' => Some(b - b'a' + 10),
         b'A'..=b'F' => Some(b - b'A' + 10),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zbus::zvariant::serialized::Context;
+
+    fn parse_response(code: u32, uri: Option<&'static str>) -> (u32, ScreenshotResponse) {
+        let mut results: HashMap<String, Value<'static>> = HashMap::new();
+        if let Some(uri) = uri {
+            results.insert("uri".to_owned(), Value::from(uri));
+        }
+
+        let data =
+            zbus::zvariant::to_bytes(Context::new_dbus(zbus::zvariant::LE, 0), &(code, results))
+                .expect("serialize portal response");
+        let (response, _) = data
+            .deserialize::<(u32, ScreenshotResponse)>()
+            .expect("deserialize portal response");
+        response
+    }
+
+    #[test]
+    fn reads_uri_from_successful_response() {
+        let (code, response) = parse_response(0, Some("file:///tmp/shot.png"));
+        assert_eq!(code, 0);
+        assert_eq!(response.uri.as_deref(), Some("file:///tmp/shot.png"));
+    }
+
+    #[test]
+    fn tolerates_empty_results_on_failure() {
+        // 授权失败时 results 为空字典；此前会误报 "missing field `uri`"。
+        let (code, response) = parse_response(2, None);
+        assert_eq!(code, 2);
+        assert!(response.uri.is_none());
     }
 }

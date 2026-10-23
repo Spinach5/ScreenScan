@@ -19,6 +19,7 @@ use winit::window::WindowId;
 
 use crate::autostart;
 use crate::capture;
+use crate::capture::CaptureFailure;
 use crate::capture::CapturedMonitor;
 use crate::config::ConfigStore;
 use crate::config::TrayIconSetting;
@@ -27,6 +28,8 @@ use crate::font::FontEntry;
 use crate::history;
 use crate::i18n::t;
 use crate::overlay::Overlay;
+use crate::permission::Effect as PermissionEffect;
+use crate::permission::PermissionWindow;
 use crate::pin::PinWindow;
 use crate::platform;
 use crate::settings::Effect as SettingsEffect;
@@ -47,7 +50,9 @@ pub enum UserEvent {
         text: Result<String, String>,
     },
     /// 抓屏失败。
-    CaptureFailed(String),
+    CaptureFailed(CaptureFailure),
+    /// 用户完成系统截屏授权，可以重新抓屏。
+    PermissionGranted,
     /// 全局快捷键事件。
     Hotkey { id: u32, pressed: bool },
     /// 托盘菜单点击（携带菜单项 id）。
@@ -82,6 +87,7 @@ pub struct App {
     store: ConfigStore,
     tray: Option<Tray>,
     settings: Option<SettingsWindow>,
+    permission: Option<PermissionWindow>,
     fonts: Vec<FontEntry>,
     fonts_scanning: bool,
     /// `--preferences`：启动后直接打开设置窗口。
@@ -112,6 +118,7 @@ impl App {
             store,
             tray: None,
             settings: None,
+            permission: None,
             fonts: Vec::new(),
             fonts_scanning: false,
             show_settings_on_start,
@@ -129,9 +136,56 @@ impl App {
                 let _ = proxy.send_event(UserEvent::Captured(screens));
             }
             Err(e) => {
-                let _ = proxy.send_event(UserEvent::CaptureFailed(e.to_string()));
+                let _ = proxy.send_event(UserEvent::CaptureFailed(capture::classify(&e)));
             }
         });
+    }
+
+    /// 打开授权引导窗口。本窗口获得焦点后，系统才允许弹出截屏授权对话框。
+    fn open_permission_window(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(window) = &self.permission {
+            window.focus();
+            return;
+        }
+        match PermissionWindow::create(event_loop, self.store.config.language) {
+            Ok(window) => self.permission = Some(window),
+            Err(e) => {
+                log::error!("创建截屏授权窗口失败: {e}");
+                self.finish_session_if_idle(event_loop);
+            }
+        }
+    }
+
+    /// 发起一次仅用于完成授权的抓屏，结果包含授权窗口本身，直接丢弃。
+    fn start_permission_grant(&mut self) {
+        if self.capturing {
+            return;
+        }
+        self.capturing = true;
+        if let Some(window) = &mut self.permission {
+            window.set_pending(true);
+            window.request_redraw();
+        }
+
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || match capture::capture_all() {
+            Ok(_) => {
+                let _ = proxy.send_event(UserEvent::PermissionGranted);
+            }
+            Err(e) => {
+                let _ = proxy.send_event(UserEvent::CaptureFailed(capture::classify(&e)));
+            }
+        });
+    }
+
+    fn finish_session_if_idle(&mut self, event_loop: &ActiveEventLoop) {
+        if !self.resident
+            && self.overlays.is_empty()
+            && self.pins.is_empty()
+            && self.permission.is_none()
+        {
+            self.schedule_exit(event_loop);
+        }
     }
 
     fn open_overlays(&mut self, event_loop: &ActiveEventLoop, screens: Vec<CapturedMonitor>) {
@@ -502,7 +556,15 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
-            UserEvent::Captured(screens) => self.open_overlays(event_loop, screens),
+            UserEvent::Captured(screens) => {
+                self.permission = None;
+                self.open_overlays(event_loop, screens);
+            }
+            UserEvent::PermissionGranted => {
+                self.capturing = false;
+                self.permission = None;
+                self.trigger_capture();
+            }
             UserEvent::Pin(image) => self.open_pin(event_loop, image),
             UserEvent::ScanResult { window_id, text } => {
                 if let Some(overlay) = self.overlays.get_mut(&window_id) {
@@ -510,11 +572,30 @@ impl ApplicationHandler<UserEvent> for App {
                     overlay.request_redraw();
                 }
             }
-            UserEvent::CaptureFailed(message) => {
+            UserEvent::CaptureFailed(failure) => {
                 self.capturing = false;
-                log::error!("capture failed: {message}");
-                if !self.resident && self.overlays.is_empty() && self.pins.is_empty() {
-                    self.schedule_exit(event_loop);
+                match failure {
+                    CaptureFailure::PermissionDenied => {
+                        log::warn!("截图需要系统授权，等待用户完成授权");
+                        if let Some(window) = &mut self.permission {
+                            let lang = self.store.config.language;
+                            window.set_status(t(lang, "permission.failed"));
+                            window.request_redraw();
+                            window.focus();
+                        } else {
+                            self.open_permission_window(event_loop);
+                        }
+                    }
+                    CaptureFailure::Cancelled => {
+                        log::info!("截图已取消");
+                        self.permission = None;
+                        self.finish_session_if_idle(event_loop);
+                    }
+                    CaptureFailure::Other(message) => {
+                        log::error!("capture failed: {message}");
+                        self.permission = None;
+                        self.finish_session_if_idle(event_loop);
+                    }
                 }
             }
             UserEvent::Hotkey { id, pressed } => {
@@ -595,6 +676,38 @@ impl ApplicationHandler<UserEvent> for App {
                     .is_some_and(|settings| settings.handle_window_event(&event));
                 if close {
                     self.settings = None;
+                }
+            }
+            return;
+        }
+
+        if self
+            .permission
+            .as_ref()
+            .is_some_and(|permission| permission.window_id() == window_id)
+        {
+            if matches!(&event, WindowEvent::RedrawRequested) {
+                let lang = self.store.config.language;
+                let effect = self.permission.as_mut().and_then(|p| p.redraw(lang));
+                match effect {
+                    Some(PermissionEffect::Grant) => {
+                        log::info!("用户请求截屏授权");
+                        self.start_permission_grant();
+                    }
+                    Some(PermissionEffect::Cancel) => {
+                        self.permission = None;
+                        self.finish_session_if_idle(event_loop);
+                    }
+                    None => {}
+                }
+            } else {
+                let close = self
+                    .permission
+                    .as_mut()
+                    .is_some_and(|permission| permission.handle_window_event(&event));
+                if close {
+                    self.permission = None;
+                    self.finish_session_if_idle(event_loop);
                 }
             }
             return;

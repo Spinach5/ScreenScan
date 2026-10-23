@@ -10,6 +10,7 @@ mod history;
 mod i18n;
 mod logging;
 mod overlay;
+mod permission;
 mod pin;
 mod platform;
 mod settings;

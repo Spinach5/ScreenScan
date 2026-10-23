@@ -4,6 +4,37 @@ use xcap::Monitor;
 #[cfg(target_os = "linux")]
 mod portal;
 
+/// 抓屏失败中需要上层特殊处理的情形。
+#[derive(Debug, Clone)]
+pub enum CaptureFailure {
+    /// 系统没有授予截屏权限（Wayland 门户无法显示授权对话框）。
+    PermissionDenied,
+    /// 用户在系统授权对话框中选择取消/拒绝。
+    Cancelled,
+    /// 其他错误。
+    Other(String),
+}
+
+impl std::fmt::Display for CaptureFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PermissionDenied => f.write_str("screenshot permission not granted"),
+            Self::Cancelled => f.write_str("screenshot cancelled"),
+            Self::Other(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for CaptureFailure {}
+
+/// 从抓屏错误中提取可分类的失败原因。
+pub fn classify(error: &anyhow::Error) -> CaptureFailure {
+    error
+        .downcast_ref::<CaptureFailure>()
+        .cloned()
+        .unwrap_or_else(|| CaptureFailure::Other(error.to_string()))
+}
+
 /// 单个显示器的几何信息（物理像素坐标）。
 #[derive(Debug, Clone)]
 pub struct MonitorInfo {
@@ -68,7 +99,14 @@ pub fn capture_all() -> anyhow::Result<Vec<CapturedMonitor>> {
                 return Ok(captured);
             }
             Ok(_) => log::warn!("single-shot capture produced incomplete monitors"),
-            Err(e) => log::warn!("single-shot desktop capture failed: {e}"),
+            Err(e) => {
+                // 权限/取消需要上层处理，回退到 xcap 只会得到
+                // "Cannot find required wayland protocol" 这类无关错误。
+                if e.downcast_ref::<CaptureFailure>().is_some() {
+                    return Err(e);
+                }
+                log::warn!("single-shot desktop capture failed: {e}");
+            }
         }
     }
 
