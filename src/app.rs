@@ -286,7 +286,9 @@ impl App {
     }
 
     fn open_pin(&mut self, event_loop: &ActiveEventLoop, image: RgbaImage) {
-        match PinWindow::create(event_loop, image) {
+        let language = self.store.config.language;
+        let filename_template = self.store.config.effective_filename_format().to_owned();
+        match PinWindow::create(event_loop, image, language, filename_template) {
             Ok(pin) => {
                 let id = pin.window_id();
                 self.pins.insert(id, pin);
