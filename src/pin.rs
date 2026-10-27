@@ -165,9 +165,6 @@ fn pin_ui(
         egui::Sense::click_and_drag(),
     );
 
-    // 菜单关闭后才允许开始拖拽，避免点击菜单项时同时拖动窗口。
-    let menu_open = ctx.any_popup_open();
-
     let mut action = None;
     response.context_menu(|ui| {
         ui.add_enabled(
@@ -200,8 +197,9 @@ fn pin_ui(
         None => {}
     }
 
-    let pressed = ctx.input(|i| i.pointer.primary_pressed());
-    if pressed && !menu_open {
+    // 用 egui 的拖拽判定替代原始按下事件：菜单弹层会拦截点击，
+    // 不会在点击菜单项时误触发窗口拖动。
+    if response.drag_started_by(egui::PointerButton::Primary) {
         let _ = window.drag_window();
     }
 }
