@@ -57,6 +57,8 @@ pub fn t(lang: Language, key: &str) -> &'static str {
         (Language::En, "settings.title") => "ScreenScan Preferences",
         (Language::ZhCn, "tab.general") => "常规",
         (Language::En, "tab.general") => "General",
+        (Language::ZhCn, "tab.shortcuts") => "快捷键",
+        (Language::En, "tab.shortcuts") => "Shortcuts",
         (Language::ZhCn, "tab.interface") => "界面",
         (Language::En, "tab.interface") => "Interface",
         (Language::ZhCn, "tab.output") => "输出",
@@ -67,6 +69,31 @@ pub fn t(lang: Language, key: &str) -> &'static str {
         (Language::En, "tab.update") => "Updates",
         (Language::ZhCn, "tab.about") => "关于",
         (Language::En, "tab.about") => "About",
+
+        (Language::ZhCn, "shortcuts.move_up") => "向上移动选区",
+        (Language::En, "shortcuts.move_up") => "Move selection up",
+        (Language::ZhCn, "shortcuts.move_down") => "向下移动选区",
+        (Language::En, "shortcuts.move_down") => "Move selection down",
+        (Language::ZhCn, "shortcuts.move_left") => "向左移动选区",
+        (Language::En, "shortcuts.move_left") => "Move selection left",
+        (Language::ZhCn, "shortcuts.move_right") => "向右移动选区",
+        (Language::En, "shortcuts.move_right") => "Move selection right",
+        (Language::ZhCn, "shortcuts.copy") => "复制选区",
+        (Language::En, "shortcuts.copy") => "Copy selection",
+        (Language::ZhCn, "shortcuts.select_all") => "选中全屏",
+        (Language::En, "shortcuts.select_all") => "Select entire screen",
+        (Language::ZhCn, "shortcuts.pin") => "贴图",
+        (Language::En, "shortcuts.pin") => "Pin selection",
+        (Language::ZhCn, "shortcuts.recording") => "请按下按键…",
+        (Language::En, "shortcuts.recording") => "Press keys…",
+        (Language::ZhCn, "shortcuts.hint") => {
+            "在截屏选区界面中生效。点击按键后按下新的组合键，Esc 取消录制"
+        }
+        (Language::En, "shortcuts.hint") => {
+            "Active in the capture overlay. Click a key, then press a new combination; Esc cancels."
+        }
+        (Language::ZhCn, "shortcuts.restore") => "恢复默认快捷键",
+        (Language::En, "shortcuts.restore") => "Restore default shortcuts",
 
         (Language::ZhCn, "general.autostart") => "开机启动",
         (Language::En, "general.autostart") => "Launch at login",

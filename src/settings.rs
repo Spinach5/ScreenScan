@@ -1,4 +1,4 @@
-//! 首选项窗口：六个标签页，所有修改即时生效。
+//! 首选项窗口：七个标签页，所有修改即时生效。
 
 use std::path::Path;
 use std::path::PathBuf;
@@ -15,6 +15,9 @@ use winit::window::WindowId;
 use crate::config::Config;
 use crate::config::DEFAULT_FILENAME_FORMAT;
 use crate::config::LogLevel;
+use crate::config::Shortcut;
+use crate::config::ShortcutAction;
+use crate::config::Shortcuts;
 use crate::config::TrayIconSetting;
 use crate::font::FontChoice;
 use crate::font::FontEntry;
@@ -42,6 +45,7 @@ pub enum Effect {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
     General,
+    Shortcuts,
     Interface,
     Output,
     Language,
@@ -50,8 +54,9 @@ enum Tab {
 }
 
 impl Tab {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::General,
+        Self::Shortcuts,
         Self::Interface,
         Self::Output,
         Self::Language,
@@ -62,6 +67,7 @@ impl Tab {
     fn label(self, lang: Language) -> &'static str {
         match self {
             Self::General => t(lang, "tab.general"),
+            Self::Shortcuts => t(lang, "tab.shortcuts"),
             Self::Interface => t(lang, "tab.interface"),
             Self::Output => t(lang, "tab.output"),
             Self::Language => t(lang, "tab.language"),
@@ -84,6 +90,8 @@ pub struct SettingsWindow {
     language_picker_open: bool,
     preview: Option<Preview>,
     status: Option<String>,
+    /// 正在等待用户按下新快捷键的动作。
+    recording: Option<ShortcutAction>,
 }
 
 impl SettingsWindow {
@@ -115,6 +123,7 @@ impl SettingsWindow {
             language_picker_open: false,
             preview: None,
             status: None,
+            recording: None,
         })
     }
 
@@ -174,6 +183,11 @@ impl SettingsWindow {
         let ctx = self.rendered.context().clone();
         update_preview(&mut self.preview, config, &ctx);
 
+        let mut effects = Vec::new();
+        if capture_shortcut(&ctx, &mut self.recording, config) {
+            effects.push(Effect::Save);
+        }
+
         let Self {
             rendered,
             tab,
@@ -182,13 +196,14 @@ impl SettingsWindow {
             language_picker_open,
             preview,
             status,
+            recording,
         } = self;
 
-        let mut effects = Vec::new();
         rendered.render(|ui| {
             settings_ui(
                 ui,
                 tab,
+                recording,
                 font_picker_open,
                 font_filter,
                 language_picker_open,
@@ -203,6 +218,49 @@ impl SettingsWindow {
         });
         effects
     }
+}
+
+/// 录制中的快捷键：Esc 取消，其余按键写入配置。
+fn capture_shortcut(
+    ctx: &egui::Context,
+    recording: &mut Option<ShortcutAction>,
+    config: &mut Config,
+) -> bool {
+    let Some(action) = *recording else {
+        return false;
+    };
+    let mut captured = None;
+    let mut cancel = false;
+    ctx.input(|i| {
+        for event in &i.events {
+            let egui::Event::Key {
+                key,
+                pressed: true,
+                repeat: false,
+                modifiers,
+                ..
+            } = event
+            else {
+                continue;
+            };
+            if *key == egui::Key::Escape && modifiers.is_none() {
+                cancel = true;
+            } else {
+                captured = Some(Shortcut::new(*modifiers, *key));
+            }
+            break;
+        }
+    });
+    if cancel {
+        *recording = None;
+        return false;
+    }
+    let Some(shortcut) = captured else {
+        return false;
+    };
+    config.shortcuts.set(action, shortcut);
+    *recording = None;
+    true
 }
 
 fn update_preview(preview: &mut Option<Preview>, config: &Config, ctx: &egui::Context) {
@@ -245,6 +303,7 @@ fn update_preview(preview: &mut Option<Preview>, config: &Config, ctx: &egui::Co
 fn settings_ui(
     ui: &mut egui::Ui,
     tab: &mut Tab,
+    recording: &mut Option<ShortcutAction>,
     font_picker_open: &mut bool,
     font_filter: &mut String,
     language_picker_open: &mut bool,
@@ -275,6 +334,7 @@ fn settings_ui(
                         .clicked()
                     {
                         *tab = candidate;
+                        *recording = None;
                     }
                 }
             });
@@ -288,6 +348,7 @@ fn settings_ui(
                 .max_height(content_height)
                 .show(ui, |ui| match *tab {
                     Tab::General => general_tab(ui, config, config_path, effects),
+                    Tab::Shortcuts => shortcuts_tab(ui, config, recording, effects),
                     Tab::Interface => interface_tab(
                         ui,
                         config,
@@ -382,6 +443,43 @@ fn general_tab(
             .small()
             .weak(),
     );
+}
+
+fn shortcuts_tab(
+    ui: &mut egui::Ui,
+    config: &mut Config,
+    recording: &mut Option<ShortcutAction>,
+    effects: &mut Vec<Effect>,
+) {
+    let lang = config.language;
+    egui::Grid::new("settings_shortcuts")
+        .num_columns(2)
+        .spacing([24.0, 12.0])
+        .show(ui, |ui| {
+            for action in ShortcutAction::ALL {
+                ui.label(action.label(lang));
+                let text = if *recording == Some(action) {
+                    t(lang, "shortcuts.recording").to_owned()
+                } else {
+                    config.shortcuts.get(action).display()
+                };
+                let button = egui::Button::new(RichText::new(text).monospace())
+                    .min_size(egui::vec2(180.0, 28.0));
+                if ui.add(button).clicked() {
+                    *recording = Some(action);
+                }
+                ui.end_row();
+            }
+        });
+
+    ui.add_space(8.0);
+    ui.label(RichText::new(t(lang, "shortcuts.hint")).small().weak());
+    ui.add_space(6.0);
+    if ui.button(t(lang, "shortcuts.restore")).clicked() {
+        config.shortcuts = Shortcuts::default();
+        *recording = None;
+        effects.push(Effect::Save);
+    }
 }
 
 fn interface_tab(

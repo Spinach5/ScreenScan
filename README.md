@@ -301,7 +301,13 @@ makensis /DVERSION=0.1.0 /DARCH=x86_64 packaging/windows/installer.nsi
 | --- | --- | --- |
 | `Ctrl+Shift+S` | 全局（Windows / macOS / X11） | 开始截图 |
 | `Ctrl+Shift+Q` | 全局（Windows / macOS / X11） | 退出应用 |
+| `↑` / `↓` / `←` / `→` | 截图覆盖层（选区阶段） | 按 1 个逻辑点移动选区 |
+| `Ctrl+C` | 截图覆盖层（选区阶段） | 复制选区并结束截图 |
+| `Ctrl+A` | 截图覆盖层（选区阶段） | 选区重置为全屏 |
+| `Ctrl+P` | 截图覆盖层（选区阶段） | 将选区贴成悬浮窗 |
 | `Esc` | 截图覆盖层 | 绘制中退回选区调整，否则退出截图 |
+
+选区快捷键可在「首选项 → 快捷键」中重新绑定。
 
 Wayland 不允许应用注册全局快捷键。请把 `screenscan -c` 绑定到桌面环境的自定义快捷键，例如：
 
@@ -327,6 +333,7 @@ Wayland 不允许应用注册全局快捷键。请把 `screenscan -c` 绑定到�
 | 标签页 | 内容 |
 | --- | --- |
 | 常规 | 开机启动；保存设置前备份配置；查看并迁移配置文件位置 |
+| 快捷键 | 重新绑定截图选区阶段的移动、复制、全屏与贴图快捷键 |
 | 界面 | 选择系统中已安装的界面字体；使用默认或自定义托盘图标（支持 PNG / JPG / WebP / BMP / GIF，过大的图片会缩放） |
 | 输出 | 日志级别（无 / 调试 / 普通 / 错误）、打开日志目录、保存文件名模板及预览 |
 | 语言 | 简体中文 / English |
@@ -380,6 +387,15 @@ filename_format=screenscan_$yyyy-MM-dd_HH-mm-ss$.png
 
 [appearance]
 language=zh-CN
+
+[shortcuts]
+move_up=Up
+move_down=Down
+move_left=Left
+move_right=Right
+copy=Ctrl+C
+select_all=Ctrl+A
+pin=Ctrl+P
 ```
 
 ### 配置项说明
@@ -396,6 +412,10 @@ language=zh-CN
 | `output.log_level` | `off` / `debug` / `info` / `error` | `info` | 终端与文件日志级别 |
 | `output.filename_format` | 文件名模板 | `screenscan_$yyyy-MM-dd_HH-mm-ss$.png` | 保存对话框的默认文件名 |
 | `appearance.language` | `zh-CN` / `en-US` | `zh-CN` | 界面语言 |
+| `shortcuts.move_up` / `move_down` / `move_left` / `move_right` | 按键名，如 `Up`、`Ctrl+Up` | 方向键 | 选区阶段移动选区 |
+| `shortcuts.copy` | 组合键，如 `Ctrl+C` | `Ctrl+C` | 复制选区 |
+| `shortcuts.select_all` | 组合键，如 `Ctrl+A` | `Ctrl+A` | 选区重置为全屏 |
+| `shortcuts.pin` | 组合键，如 `Ctrl+P` | `Ctrl+P` | 贴图 |
 | `storage.config_path` | 绝对路径 | 无 | 仅出现在默认路径的引导文件中 |
 
 INI 解析器会忽略以 `;` 或 `#` 开头的注释，节名与键名不区分大小写。
@@ -502,7 +522,7 @@ src/
 │   └── scan.rs        # rxing 解码与预处理
 ├── pin.rs             # 贴图悬浮窗
 ├── tray.rs            # 系统托盘与菜单
-├── settings.rs        # 首选项窗口（六个标签页）
+├── settings.rs        # 首选项窗口（七个标签页）
 ├── permission.rs      # Wayland 截屏授权引导窗口
 ├── config.rs          # config.ini 读写、迁移、文件名模板
 ├── i18n.rs            # 托盘 / 设置 / 授权窗口的中英文字典

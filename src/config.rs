@@ -7,6 +7,8 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use anyhow::Result;
+use egui::Key;
+use egui::Modifiers;
 
 use crate::font::FontChoice;
 use crate::i18n::Language;
@@ -14,6 +16,210 @@ use crate::i18n::t;
 use crate::util::path;
 
 pub const DEFAULT_FILENAME_FORMAT: &str = "screenscan_$yyyy-MM-dd_HH-mm-ss$.png";
+
+/// 覆盖层内可配置的键盘快捷键。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shortcut {
+    pub key: Key,
+    pub modifiers: Modifiers,
+}
+
+impl Shortcut {
+    pub const fn new(modifiers: Modifiers, key: Key) -> Self {
+        Self { key, modifiers }
+    }
+
+    /// 解析 `Ctrl+Shift+C` 形式；无法识别时返回 `None`。
+    pub fn parse(text: &str) -> Option<Self> {
+        let mut modifiers = Modifiers::NONE;
+        let mut key = None;
+        for part in text
+            .split('+')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+        {
+            match part.to_ascii_lowercase().as_str() {
+                "ctrl" | "control" => {
+                    modifiers.ctrl = true;
+                    // 让配置在 Windows/Linux 与 macOS 之间通用。
+                    modifiers.command = true;
+                }
+                "shift" => modifiers.shift = true,
+                "alt" | "option" => modifiers.alt = true,
+                "cmd" | "command" | "super" | "win" | "meta" => modifiers.mac_cmd = true,
+                _ => key = Key::from_name(part),
+            }
+        }
+        Some(Self {
+            key: key?,
+            modifiers,
+        })
+    }
+
+    pub fn to_ini(self) -> String {
+        let mut out = String::new();
+        if self.modifiers.mac_cmd {
+            out.push_str("Cmd+");
+        } else if self.modifiers.ctrl || self.modifiers.command {
+            out.push_str("Ctrl+");
+        }
+        if self.modifiers.shift {
+            out.push_str("Shift+");
+        }
+        if self.modifiers.alt {
+            out.push_str("Alt+");
+        }
+        out.push_str(self.key.name());
+        out
+    }
+
+    pub fn display(self) -> String {
+        let key = match self.key {
+            Key::ArrowUp => "↑",
+            Key::ArrowDown => "↓",
+            Key::ArrowLeft => "←",
+            Key::ArrowRight => "→",
+            key => key.name(),
+        };
+        let mut parts = Vec::with_capacity(4);
+        if self.modifiers.mac_cmd {
+            parts.push("Cmd");
+        } else if self.modifiers.ctrl || self.modifiers.command {
+            parts.push("Ctrl");
+        }
+        if self.modifiers.shift {
+            parts.push("Shift");
+        }
+        if self.modifiers.alt {
+            parts.push("Alt");
+        }
+        parts.push(key);
+        parts.join("+")
+    }
+
+    pub fn matches_event(self, event: &egui::Event) -> bool {
+        match event {
+            egui::Event::Key {
+                key,
+                pressed: true,
+                modifiers,
+                ..
+            } => *key == self.key && modifiers.matches_exact(self.modifiers),
+            _ => false,
+        }
+    }
+}
+
+/// 覆盖层内可重绑定的动作。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShortcutAction {
+    MoveUp,
+    MoveDown,
+    MoveLeft,
+    MoveRight,
+    Copy,
+    SelectAll,
+    Pin,
+}
+
+impl ShortcutAction {
+    pub const ALL: [Self; 7] = [
+        Self::MoveUp,
+        Self::MoveDown,
+        Self::MoveLeft,
+        Self::MoveRight,
+        Self::Copy,
+        Self::SelectAll,
+        Self::Pin,
+    ];
+
+    pub fn config_key(self) -> &'static str {
+        match self {
+            Self::MoveUp => "move_up",
+            Self::MoveDown => "move_down",
+            Self::MoveLeft => "move_left",
+            Self::MoveRight => "move_right",
+            Self::Copy => "copy",
+            Self::SelectAll => "select_all",
+            Self::Pin => "pin",
+        }
+    }
+
+    pub fn default_shortcut(self) -> Shortcut {
+        match self {
+            Self::MoveUp => Shortcut::new(Modifiers::NONE, Key::ArrowUp),
+            Self::MoveDown => Shortcut::new(Modifiers::NONE, Key::ArrowDown),
+            Self::MoveLeft => Shortcut::new(Modifiers::NONE, Key::ArrowLeft),
+            Self::MoveRight => Shortcut::new(Modifiers::NONE, Key::ArrowRight),
+            Self::Copy => Shortcut::new(Modifiers::CTRL, Key::C),
+            Self::SelectAll => Shortcut::new(Modifiers::CTRL, Key::A),
+            Self::Pin => Shortcut::new(Modifiers::CTRL, Key::P),
+        }
+    }
+
+    pub fn label(self, lang: Language) -> &'static str {
+        match self {
+            Self::MoveUp => t(lang, "shortcuts.move_up"),
+            Self::MoveDown => t(lang, "shortcuts.move_down"),
+            Self::MoveLeft => t(lang, "shortcuts.move_left"),
+            Self::MoveRight => t(lang, "shortcuts.move_right"),
+            Self::Copy => t(lang, "shortcuts.copy"),
+            Self::SelectAll => t(lang, "shortcuts.select_all"),
+            Self::Pin => t(lang, "shortcuts.pin"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shortcuts {
+    pub move_up: Shortcut,
+    pub move_down: Shortcut,
+    pub move_left: Shortcut,
+    pub move_right: Shortcut,
+    pub copy: Shortcut,
+    pub select_all: Shortcut,
+    pub pin: Shortcut,
+}
+
+impl Default for Shortcuts {
+    fn default() -> Self {
+        Self {
+            move_up: ShortcutAction::MoveUp.default_shortcut(),
+            move_down: ShortcutAction::MoveDown.default_shortcut(),
+            move_left: ShortcutAction::MoveLeft.default_shortcut(),
+            move_right: ShortcutAction::MoveRight.default_shortcut(),
+            copy: ShortcutAction::Copy.default_shortcut(),
+            select_all: ShortcutAction::SelectAll.default_shortcut(),
+            pin: ShortcutAction::Pin.default_shortcut(),
+        }
+    }
+}
+
+impl Shortcuts {
+    pub fn get(self, action: ShortcutAction) -> Shortcut {
+        match action {
+            ShortcutAction::MoveUp => self.move_up,
+            ShortcutAction::MoveDown => self.move_down,
+            ShortcutAction::MoveLeft => self.move_left,
+            ShortcutAction::MoveRight => self.move_right,
+            ShortcutAction::Copy => self.copy,
+            ShortcutAction::SelectAll => self.select_all,
+            ShortcutAction::Pin => self.pin,
+        }
+    }
+
+    pub fn set(&mut self, action: ShortcutAction, shortcut: Shortcut) {
+        match action {
+            ShortcutAction::MoveUp => self.move_up = shortcut,
+            ShortcutAction::MoveDown => self.move_down = shortcut,
+            ShortcutAction::MoveLeft => self.move_left = shortcut,
+            ShortcutAction::MoveRight => self.move_right = shortcut,
+            ShortcutAction::Copy => self.copy = shortcut,
+            ShortcutAction::SelectAll => self.select_all = shortcut,
+            ShortcutAction::Pin => self.pin = shortcut,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogLevel {
@@ -87,6 +293,7 @@ pub struct Config {
     pub log_level: LogLevel,
     pub filename_format: String,
     pub language: Language,
+    pub shortcuts: Shortcuts,
 }
 
 impl Default for Config {
@@ -99,6 +306,7 @@ impl Default for Config {
             log_level: LogLevel::Info,
             filename_format: DEFAULT_FILENAME_FORMAT.to_owned(),
             language: Language::ZhCn,
+            shortcuts: Shortcuts::default(),
         }
     }
 }
@@ -137,6 +345,21 @@ impl Config {
             .unwrap_or(DEFAULT_FILENAME_FORMAT)
             .to_owned();
 
+        let shortcut = |action: ShortcutAction| {
+            get("shortcuts", action.config_key())
+                .and_then(Shortcut::parse)
+                .unwrap_or(action.default_shortcut())
+        };
+        let shortcuts = Shortcuts {
+            move_up: shortcut(ShortcutAction::MoveUp),
+            move_down: shortcut(ShortcutAction::MoveDown),
+            move_left: shortcut(ShortcutAction::MoveLeft),
+            move_right: shortcut(ShortcutAction::MoveRight),
+            copy: shortcut(ShortcutAction::Copy),
+            select_all: shortcut(ShortcutAction::SelectAll),
+            pin: shortcut(ShortcutAction::Pin),
+        };
+
         Self {
             autostart: parse_bool(get("general", "autostart"), false),
             auto_backup: parse_bool(get("general", "auto_backup"), false),
@@ -145,6 +368,7 @@ impl Config {
             log_level: LogLevel::parse(get("output", "log_level").unwrap_or("info")),
             filename_format,
             language: Language::parse(get("appearance", "language").unwrap_or("zh-CN")),
+            shortcuts,
         }
     }
 
@@ -171,6 +395,14 @@ impl Config {
         out.push_str(&format!("filename_format={}\n", self.filename_format));
         out.push_str("\n[appearance]\n");
         out.push_str(&format!("language={}\n", self.language.code()));
+        out.push_str("\n[shortcuts]\n");
+        for action in ShortcutAction::ALL {
+            out.push_str(&format!(
+                "{}={}\n",
+                action.config_key(),
+                self.shortcuts.get(action).to_ini()
+            ));
+        }
         out
     }
 
@@ -410,5 +642,42 @@ mod tests {
         assert_eq!(LogLevel::parse("off"), LogLevel::Off);
         assert_eq!(LogLevel::parse("错误"), LogLevel::Error);
         assert_eq!(LogLevel::parse("unknown"), LogLevel::Info);
+    }
+
+    #[test]
+    fn shortcut_roundtrip_and_display() {
+        let shortcut = Shortcut::parse("Ctrl+Shift+A").expect("valid shortcut");
+        assert_eq!(shortcut.key, Key::A);
+        assert_eq!(shortcut.to_ini(), "Ctrl+Shift+A");
+        assert_eq!(shortcut.display(), "Ctrl+Shift+A");
+
+        let up = Shortcut::parse("Up").expect("valid arrow key");
+        assert_eq!(up.key, Key::ArrowUp);
+        assert_eq!(up.display(), "↑");
+        assert!(Shortcut::parse("NotAKey").is_none());
+    }
+
+    #[test]
+    fn shortcut_matches_only_with_exact_modifiers() {
+        let key_event = |modifiers| egui::Event::Key {
+            key: Key::C,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        };
+        let copy = Shortcuts::default().copy;
+        assert!(copy.matches_event(&key_event(Modifiers::CTRL.plus(Modifiers::COMMAND))));
+        assert!(!copy.matches_event(&key_event(Modifiers::NONE)));
+        assert!(!copy.matches_event(&key_event(Modifiers::CTRL.plus(Modifiers::SHIFT))));
+    }
+
+    #[test]
+    fn ini_roundtrip_keeps_custom_shortcut() {
+        let mut config = Config::default();
+        config.shortcuts.pin = Shortcut::new(Modifiers::ALT, Key::P);
+        let parsed = Config::from_ini(&config.to_ini());
+        assert_eq!(parsed.shortcuts.pin, config.shortcuts.pin);
+        assert_eq!(parsed.shortcuts.copy.key, Key::C);
     }
 }

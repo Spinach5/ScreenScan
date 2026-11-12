@@ -208,6 +208,7 @@ impl App {
                 screen,
                 self.proxy.clone(),
                 filename_template.clone(),
+                self.store.config.shortcuts,
             ) {
                 Ok(overlay) => {
                     let id = overlay.window_id();

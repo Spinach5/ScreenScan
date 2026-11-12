@@ -26,6 +26,7 @@ use crate::annotate::ToolKind;
 use crate::annotate::render as annotate_render;
 use crate::app::UserEvent;
 use crate::capture::CapturedMonitor;
+use crate::config::Shortcuts;
 use crate::graphics::RenderedWindow;
 use crate::platform;
 use crate::toolbar;
@@ -95,6 +96,8 @@ pub struct OverlayState {
     pub proxy: EventLoopProxy<UserEvent>,
     /// 保存文件名模板（来自设置）。
     pub filename_template: String,
+    /// 选区阶段的键盘快捷键（来自设置）。
+    pub shortcuts: Shortcuts,
 }
 
 impl OverlayState {
@@ -159,6 +162,7 @@ impl OverlayState {
         if !(pointer_over_ui && self.drag.is_none() && self.drawing.is_none()) {
             self.handle_input(&ctx);
         }
+        self.handle_shortcuts(&ctx);
 
         // 4) 蒙层 + 选区挖空
         let sel_pts = self.selection.map(|s| self.physical_rect_to_points(s.rect));
@@ -496,6 +500,61 @@ impl OverlayState {
         }
     }
 
+    /// 选区阶段的键盘快捷键：移动、复制、全屏、贴图。
+    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        if matches!(self.state, State::Selecting | State::Done) {
+            return;
+        }
+        let shortcuts = self.shortcuts;
+        let (copy, pin, select_all, move_up, move_down, move_left, move_right) = ctx.input(|i| {
+            let hit = |shortcut: crate::config::Shortcut| {
+                i.events.iter().any(|event| shortcut.matches_event(event))
+            };
+            (
+                hit(shortcuts.copy),
+                hit(shortcuts.pin),
+                hit(shortcuts.select_all),
+                hit(shortcuts.move_up),
+                hit(shortcuts.move_down),
+                hit(shortcuts.move_left),
+                hit(shortcuts.move_right),
+            )
+        });
+
+        if copy {
+            self.perform_action(true);
+            return;
+        }
+        if pin {
+            self.perform_pin();
+            return;
+        }
+        if select_all {
+            self.selection = Some(self.default_selection());
+            self.drag = None;
+            self.drawing = None;
+            self.erased_accum.clear();
+            self.state = State::Selected;
+            return;
+        }
+        if self.state == State::Annotating {
+            return;
+        }
+
+        // 每次按键移动 1 个逻辑点（物理像素按缩放换算）。
+        let step = self.scale;
+        let dx = (move_right as i8 - move_left as i8) as f32 * step;
+        let dy = (move_down as i8 - move_up as i8) as f32 * step;
+        if dx == 0.0 && dy == 0.0 {
+            return;
+        }
+        let (w, h) = self.screen.image.dimensions();
+        let bounds = Rect::from_min_size(Pos2::ZERO, Vec2::new(w as f32, h as f32));
+        if let Some(selection) = self.selection.as_mut() {
+            selection.move_by(Vec2::new(dx, dy), bounds);
+        }
+    }
+
     fn begin_press(&mut self, pos: Pos2) {
         self.anchor = Some(pos);
         self.drag = None;
@@ -607,6 +666,7 @@ impl Overlay {
         screen: CapturedMonitor,
         proxy: EventLoopProxy<UserEvent>,
         filename_template: String,
+        shortcuts: Shortcuts,
     ) -> anyhow::Result<Self> {
         // 按名称（优先）或位置/尺寸匹配 winit 显示器，使用「按显示器全屏」
         // 让覆盖层精确铺满对应屏幕（Wayland 无法绝对定位时同样有效）。
@@ -688,6 +748,7 @@ impl Overlay {
             scanning: false,
             proxy,
             filename_template,
+            shortcuts,
         };
 
         // X11：首帧画好后再显示窗口，避免启动黑屏/闪烁。
