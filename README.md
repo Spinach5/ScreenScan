@@ -267,12 +267,13 @@ makensis /DVERSION=0.1.0 /DARCH=x86_64 packaging/windows/installer.nsi
 
 ### 贴图窗口
 
-贴图窗口是无边框、不可缩放的独立窗口，显示带标注的合成图像：
+贴图窗口是悬浮在屏幕最上层的无边框图像（与 Snipaste 贴图一致），显示带标注的合成图像：
 
 - 在图像任意位置按住左键可拖动窗口。
-- 右键弹出菜单：查看当前尺寸（如 `300 × 200 px`）、保存到指定目录、销毁贴图。
-- Windows / macOS / X11（含 Wayland 会话下的 XWayland）下保持置顶；窗口失去焦点时会重新断言置顶。
-- 原生 Wayland 会话下无法通用置顶，窗口降级为普通无边框窗口。
+- 右键弹出菜单：查看当前尺寸（如 `300 × 200 px`）、保存到指定目录、销毁贴图；`Esc` 也可直接销毁。
+- Linux X11（含 Wayland 会话下的 XWayland）下为覆盖重定向窗口，不进入任务栏 / Alt+Tab，也不受窗口管理器管理；Windows 下为跳过任务栏的工具窗口。
+- Windows / macOS / X11 下保持置顶；Windows / macOS 窗口失去焦点时会重新断言置顶。
+- 原生 Wayland 会话下无法通用置顶，窗口降级为普通无边框窗口（会出现在任务栏中）。
 - 一次性模式（`-c`）下，最后一个贴图销毁后应用才会退出；常驻模式不受影响。
 
 ### 条码 / 二维码扫描
@@ -463,7 +464,7 @@ RUST_LOG=debug ./target/release/ScreenScan
 
 - **全局快捷键不可用**：Wayland 不提供通用全局快捷键接口。使用 `screenscan -c` 配合桌面环境自定义快捷键。
 - **窗口无法绝对定位**：纯 Wayland 下覆盖层按输出全屏，而不是按坐标摆放；存在 XWayland（`DISPLAY` 可用）时，应用会优先使用 winit 的 X11 后端以精确定位多显示器覆盖层。
-- **贴图无法通用置顶**：贴图窗口会降级为普通无边框窗口。
+- **贴图无法通用置顶**：贴图窗口会降级为普通无边框窗口，并会出现在任务栏 / Alt+Tab 中。
 - **依赖桌面门户**：截屏通过 `xdg-desktop-portal` + PipeWire。需要安装门户及其桌面后端：
   - GNOME：`xdg-desktop-portal-gnome`
   - KDE：`xdg-desktop-portal-kde`
