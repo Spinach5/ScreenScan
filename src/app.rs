@@ -42,8 +42,11 @@ use crate::util;
 pub enum UserEvent {
     /// 后台抓屏完成。
     Captured(Vec<CapturedMonitor>),
-    /// 请求创建贴图窗口（图片为选区合成结果）。
-    Pin(RgbaImage),
+    /// 请求创建贴图窗口（图片为选区合成结果，position 为选区全局物理坐标）。
+    Pin {
+        image: RgbaImage,
+        position: winit::dpi::PhysicalPosition<i32>,
+    },
     /// 后台扫描完成，路由回对应覆盖层。
     ScanResult {
         window_id: WindowId,
@@ -286,10 +289,15 @@ impl App {
         event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
     }
 
-    fn open_pin(&mut self, event_loop: &ActiveEventLoop, image: RgbaImage) {
+    fn open_pin(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        image: RgbaImage,
+        position: winit::dpi::PhysicalPosition<i32>,
+    ) {
         let language = self.store.config.language;
         let filename_template = self.store.config.effective_filename_format().to_owned();
-        match PinWindow::create(event_loop, image, language, filename_template) {
+        match PinWindow::create(event_loop, image, position, language, filename_template) {
             Ok(pin) => {
                 let id = pin.window_id();
                 self.pins.insert(id, pin);
@@ -568,7 +576,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.permission = None;
                 self.trigger_capture();
             }
-            UserEvent::Pin(image) => self.open_pin(event_loop, image),
+            UserEvent::Pin { image, position } => self.open_pin(event_loop, image, position),
             UserEvent::ScanResult { window_id, text } => {
                 if let Some(overlay) = self.overlays.get_mut(&window_id) {
                     overlay.set_scan_result(text);

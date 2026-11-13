@@ -1,10 +1,10 @@
-//! 贴图悬浮窗口：像 Snipaste 贴图一样悬浮在屏幕上方，可拖拽、右键菜单操作。
+//! 贴图悬浮窗口：像 Snipaste / Flameshot 贴图一样悬浮在屏幕上方，可拖拽、右键菜单操作。
 //!
-//! - X11（含 Wayland 会话下的 XWayland）：覆盖重定向窗口，不归窗口管理器管理，
-//!   因此不会出现在任务栏 / Alt+Tab，也不会有标题栏和系统右键菜单。
+//! 使用普通无边框置顶窗口：位置由创建时传入（选区全局坐标），拖动交给窗口管理器。
+//! - X11（含 Wayland 会话下的 XWayland）：`Utility` 窗口类型，不进入任务栏 / Alt+Tab。
 //! - Windows：跳过任务栏的工具窗口，置顶。
 //! - macOS：无边框置顶窗口。
-//! - 原生 Wayland：无通用置顶，降级为普通无边框窗口（技术方案 §1.8）。
+//! - 原生 Wayland：无通用置顶与绝对定位，降级为普通无边框窗口（技术方案 §1.8）。
 
 use std::path::PathBuf;
 
@@ -33,12 +33,11 @@ pub struct PinWindow {
     texture: Option<TextureHandle>,
     close_requested: bool,
     topmost: bool,
-    /// 覆盖重定向窗口不归 WM 管理，`drag_window` 无效，需要自己移动。
+    /// X11（含 XWayland）下自行移动：不依赖 WM 的 `_NET_WM_MOVERESIZE`，
+    /// 与 Flameshot 贴图一致。
     manual_drag: bool,
-    /// 手动拖拽时指针在窗口内的偏移（物理像素）。
+    /// 手动拖拽时指针在窗口内的抓取偏移（物理像素）。
     drag_offset: Option<egui::Vec2>,
-    /// 首帧后已尝试获取键盘焦点（覆盖重定向窗口需自行设置）。
-    focus_set: bool,
     language: Language,
     filename_template: String,
 }
@@ -53,21 +52,20 @@ impl PinWindow {
     pub fn create(
         event_loop: &ActiveEventLoop,
         image: RgbaImage,
+        position: PhysicalPosition<i32>,
         language: Language,
         filename_template: String,
     ) -> anyhow::Result<Self> {
         let (w, h) = image.dimensions();
-        // X11 下用覆盖重定向窗口：WM 完全不管理它，任务栏 / Alt+Tab 里都不会出现。
-        let override_redirect = platform::use_x11_backend();
         // Wayland 后端会忽略窗口层级；但 Wayland 会话下若走 XWayland（X11）后端，
-        // 窗口本就在 WM 之上。原生 Wayland 无法通用置顶。
-        let topmost = !override_redirect && !platform::is_wayland();
+        // 置顶仍然生效。原生 Wayland 无法通用置顶。
+        let topmost = !platform::is_wayland() || platform::use_x11_backend();
         let level = if topmost {
             WindowLevel::AlwaysOnTop
         } else {
             WindowLevel::Normal
         };
-        if !topmost && !override_redirect {
+        if !topmost {
             log::warn!("原生 Wayland 不支持通用置顶，贴图窗口降级为普通无边框窗口");
         }
 
@@ -77,12 +75,15 @@ impl PinWindow {
             .with_resizable(false)
             .with_visible(false)
             .with_window_level(level)
+            .with_position(position)
             .with_inner_size(PhysicalSize::new(w, h));
 
         #[cfg(target_os = "linux")]
-        if override_redirect {
+        {
             use winit::platform::x11::WindowAttributesExtX11 as _;
-            attributes = attributes.with_override_redirect(true);
+            use winit::platform::x11::WindowType;
+            // Utility 窗口通常不进入任务栏 / Alt+Tab，同时仍能被聚焦、接收输入。
+            attributes = attributes.with_x11_window_type(vec![WindowType::Utility]);
         }
 
         #[cfg(target_os = "windows")]
@@ -93,10 +94,7 @@ impl PinWindow {
 
         let rendered = unsafe { RenderedWindow::create(event_loop, attributes)? };
         rendered.window().set_visible(true);
-        // 覆盖重定向窗口在首帧绘制后再自行抢焦点（此时窗口已映射）。
-        if !override_redirect {
-            rendered.window().focus_window();
-        }
+        rendered.window().focus_window();
         rendered.window().request_redraw();
 
         Ok(Self {
@@ -105,9 +103,8 @@ impl PinWindow {
             texture: None,
             close_requested: false,
             topmost,
-            manual_drag: override_redirect,
+            manual_drag: platform::use_x11_backend(),
             drag_offset: None,
-            focus_set: false,
             language,
             filename_template,
         })
@@ -144,10 +141,6 @@ impl PinWindow {
     }
 
     fn redraw(&mut self) {
-        if self.manual_drag && !self.focus_set {
-            self.focus_set = true;
-            set_x11_focus(self.rendered.window());
-        }
         let window = self.rendered.window().clone();
         let image = &self.image;
         let texture = &mut self.texture;
@@ -190,12 +183,6 @@ fn pin_ui(
     // Snipaste 习惯：Esc 直接销毁贴图。
     if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
         *close_requested = true;
-    }
-
-    // 覆盖重定向窗口不归 WM 管理，点击不会自动获得键盘焦点，
-    // 需要自己设置，否则 Esc 收不到。
-    if manual_drag && ctx.input(|i| i.pointer.any_pressed()) {
-        set_x11_focus(window);
     }
 
     if texture.is_none() {
@@ -252,11 +239,11 @@ fn pin_ui(
         None => {}
     }
 
+    // 用 egui 的拖拽判定替代原始按下事件：菜单弹层会拦截点击，
+    // 不会在点击菜单项时误触发窗口拖动。
     if manual_drag {
-        // 覆盖重定向窗口没有 WM 拖动，按「全局指针 - 抓取偏移」自己移动。
+        // X11 下自己移动窗口，不依赖 WM 是否实现 `_NET_WM_MOVERESIZE`。
         let scale = window.scale_factor() as f32;
-        // 用 egui 的拖拽判定替代原始按下事件：菜单弹层会拦截点击，
-        // 不会在点击菜单项时误触发窗口拖动。
         if response.drag_started_by(egui::PointerButton::Primary) {
             *drag_offset = ctx
                 .input(|i| i.pointer.latest_pos())
@@ -279,7 +266,7 @@ fn pin_ui(
     }
 }
 
-/// 覆盖重定向窗口的移动目标（物理像素）：指针全局位置减去按下时的窗口内偏移。
+/// 手动拖拽的移动目标（物理像素）：指针全局位置减去按下时的抓取偏移。
 fn drag_position(
     window_position: PhysicalPosition<i32>,
     pointer: egui::Pos2,
@@ -295,36 +282,6 @@ fn drag_position(
         (global.y - grab_offset.y).round() as i32,
     )
 }
-
-/// 把键盘焦点交给覆盖重定向窗口（winit 的 `focus_window` 只通过 WM 激活窗口）。
-#[cfg(target_os = "linux")]
-fn set_x11_focus(window: &Window) {
-    use winit::raw_window_handle::HasWindowHandle as _;
-    use winit::raw_window_handle::RawWindowHandle;
-    use x11_dl::xlib::Xlib;
-
-    let Ok(handle) = window.window_handle() else {
-        return;
-    };
-    let RawWindowHandle::Xlib(handle) = handle.as_raw() else {
-        return;
-    };
-    let Ok(xlib) = Xlib::open() else {
-        return;
-    };
-    unsafe {
-        let display = (xlib.XOpenDisplay)(std::ptr::null());
-        if display.is_null() {
-            return;
-        }
-        (xlib.XSetInputFocus)(display, handle.window, x11_dl::xlib::RevertToParent, 0);
-        (xlib.XFlush)(display);
-        (xlib.XCloseDisplay)(display);
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn set_x11_focus(_window: &Window) {}
 
 /// 选择目录后按文件名模板写出图片（模板省略扩展名时补 `.png`）。
 fn choose_folder_and_save(

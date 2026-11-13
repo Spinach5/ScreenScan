@@ -328,7 +328,15 @@ impl OverlayState {
         };
         let (base, origin) = util::image::crop(&self.screen.image, selection.rect);
         let composed = annotate_render::compose(&base, &self.board.strokes, origin, self.scale);
-        match self.proxy.send_event(UserEvent::Pin(composed)) {
+        // 贴图贴在选区原位：图像像素即显示器物理像素，叠加上显示器的全局原点。
+        let position = PhysicalPosition::new(
+            self.screen.monitor.x + origin.x as i32,
+            self.screen.monitor.y + origin.y as i32,
+        );
+        match self.proxy.send_event(UserEvent::Pin {
+            image: composed,
+            position,
+        }) {
             Ok(()) => log::info!("请求创建贴图窗口"),
             Err(e) => log::warn!("贴图事件发送失败: {e}"),
         }
