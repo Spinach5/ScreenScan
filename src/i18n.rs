@@ -57,8 +57,8 @@ pub fn t(lang: Language, key: &str) -> &'static str {
         (Language::En, "settings.title") => "ScreenScan Preferences",
         (Language::ZhCn, "tab.general") => "常规",
         (Language::En, "tab.general") => "General",
-        (Language::ZhCn, "tab.shortcuts") => "快捷键",
-        (Language::En, "tab.shortcuts") => "Shortcuts",
+        (Language::ZhCn, "tab.control") => "控制",
+        (Language::En, "tab.control") => "Control",
         (Language::ZhCn, "tab.interface") => "界面",
         (Language::En, "tab.interface") => "Interface",
         (Language::ZhCn, "tab.output") => "输出",
@@ -80,20 +80,109 @@ pub fn t(lang: Language, key: &str) -> &'static str {
         (Language::En, "shortcuts.move_right") => "Move selection right",
         (Language::ZhCn, "shortcuts.copy") => "复制选区",
         (Language::En, "shortcuts.copy") => "Copy selection",
+        (Language::ZhCn, "shortcuts.save") => "保存选区",
+        (Language::En, "shortcuts.save") => "Save selection",
         (Language::ZhCn, "shortcuts.select_all") => "选中全屏",
         (Language::En, "shortcuts.select_all") => "Select entire screen",
         (Language::ZhCn, "shortcuts.pin") => "贴图",
         (Language::En, "shortcuts.pin") => "Pin selection",
+        (Language::ZhCn, "shortcuts.undo") => "撤销标注",
+        (Language::En, "shortcuts.undo") => "Undo annotation",
+        (Language::ZhCn, "shortcuts.redo") => "重做标注",
+        (Language::En, "shortcuts.redo") => "Redo annotation",
+        (Language::ZhCn, "shortcuts.scan") => "识别条码",
+        (Language::En, "shortcuts.scan") => "Scan barcode",
         (Language::ZhCn, "shortcuts.recording") => "请按下按键…",
         (Language::En, "shortcuts.recording") => "Press keys…",
-        (Language::ZhCn, "shortcuts.hint") => {
-            "在截屏选区界面中生效。点击按键后按下新的组合键，Esc 取消录制"
+        (Language::ZhCn, "shortcuts.unset") => "未设置",
+        (Language::En, "shortcuts.unset") => "Not set",
+
+        (Language::ZhCn, "control.global") => "全局快捷键",
+        (Language::En, "control.global") => "Global shortcuts",
+        (Language::ZhCn, "control.app") => "应用内快捷键",
+        (Language::En, "control.app") => "In-app shortcuts",
+        (Language::ZhCn, "control.internal") => "内部快捷键",
+        (Language::En, "control.internal") => "Internal shortcuts",
+        (Language::ZhCn, "control.mouse") => "鼠标",
+        (Language::En, "control.mouse") => "Mouse",
+        (Language::ZhCn, "control.global_hint") => {
+            "常驻托盘时生效。Wayland 会话不支持全局快捷键，请改用系统快捷键绑定 screenscan -c"
         }
-        (Language::En, "shortcuts.hint") => {
-            "Active in the capture overlay. Click a key, then press a new combination; Esc cancels."
+        (Language::En, "control.global_hint") => {
+            "Active while running in the tray. Wayland does not support global hotkeys; bind `screenscan -c` in your desktop settings instead."
         }
-        (Language::ZhCn, "shortcuts.restore") => "恢复默认快捷键",
-        (Language::En, "shortcuts.restore") => "Restore default shortcuts",
+        (Language::ZhCn, "control.app_hint") => {
+            "在截屏选区界面内生效。点击绑定后按下新组合，再点确认按钮生效；× 清除绑定"
+        }
+        (Language::En, "control.app_hint") => {
+            "Active in the capture overlay. Click a binding, press a new combination, then press the check button; × clears it."
+        }
+        (Language::ZhCn, "control.mouse_hint") => {
+            "作用于贴图窗口。修改后点确认按钮生效；如有冲突，由上至下优先匹配；× 可清除绑定"
+        }
+        (Language::En, "control.mouse_hint") => {
+            "Applies to pinned images. Press the check button to apply; conflicts resolve top to bottom; × clears a binding."
+        }
+        (Language::ZhCn, "control.restore") => "恢复默认",
+        (Language::En, "control.restore") => "Restore defaults",
+        (Language::ZhCn, "control.delay") => "自定义截屏延迟",
+        (Language::En, "control.delay") => "Custom capture delay",
+        (Language::ZhCn, "control.seconds") => "秒",
+        (Language::En, "control.seconds") => "s",
+
+        (Language::ZhCn, "global.capture") => "截屏",
+        (Language::En, "global.capture") => "Capture",
+        (Language::ZhCn, "global.capture_copy") => "截屏并自动复制",
+        (Language::En, "global.capture_copy") => "Capture and copy",
+        (Language::ZhCn, "global.custom_capture") => "自定义截屏（延迟）",
+        (Language::En, "global.custom_capture") => "Custom capture (delayed)",
+        (Language::ZhCn, "global.pin") => "贴图（剪贴板图片）",
+        (Language::En, "global.pin") => "Pin clipboard image",
+        (Language::ZhCn, "global.toggle_pins") => "隐藏/显示所有贴图",
+        (Language::En, "global.toggle_pins") => "Hide/show all pins",
+        (Language::ZhCn, "global.next_pin_group") => "切换到另一贴图组",
+        (Language::En, "global.next_pin_group") => "Switch pin group",
+        (Language::ZhCn, "global.toggle_click_through") => "开/关鼠标穿透",
+        (Language::En, "global.toggle_click_through") => "Toggle click-through",
+        (Language::ZhCn, "global.quit") => "退出程序",
+        (Language::En, "global.quit") => "Quit",
+
+        (Language::ZhCn, "mouse.zoom_in") => "放大贴图",
+        (Language::En, "mouse.zoom_in") => "Zoom in",
+        (Language::ZhCn, "mouse.zoom_out") => "缩小贴图",
+        (Language::En, "mouse.zoom_out") => "Zoom out",
+        (Language::ZhCn, "mouse.move") => "移动贴图",
+        (Language::En, "mouse.move") => "Move pin",
+        (Language::ZhCn, "mouse.copy") => "复制贴图",
+        (Language::En, "mouse.copy") => "Copy pin",
+        (Language::ZhCn, "mouse.save") => "保存贴图",
+        (Language::En, "mouse.save") => "Save pin",
+        (Language::ZhCn, "mouse.close") => "关闭贴图",
+        (Language::En, "mouse.close") => "Close pin",
+        (Language::ZhCn, "mouse.reset_zoom") => "重置缩放",
+        (Language::En, "mouse.reset_zoom") => "Reset zoom",
+        (Language::ZhCn, "mouse.toggle_click_through") => "开/关鼠标穿透",
+        (Language::En, "mouse.toggle_click_through") => "Toggle click-through",
+        (Language::ZhCn, "mouse.input_left") => "左键",
+        (Language::En, "mouse.input_left") => "Left",
+        (Language::ZhCn, "mouse.input_middle") => "中键",
+        (Language::En, "mouse.input_middle") => "Middle",
+        (Language::ZhCn, "mouse.input_right") => "右键",
+        (Language::En, "mouse.input_right") => "Right",
+        (Language::ZhCn, "mouse.input_wheel_up") => "滚轮上",
+        (Language::En, "mouse.input_wheel_up") => "Wheel up",
+        (Language::ZhCn, "mouse.input_wheel_down") => "滚轮下",
+        (Language::En, "mouse.input_wheel_down") => "Wheel down",
+        (Language::ZhCn, "mouse.gesture_click") => "单击",
+        (Language::En, "mouse.gesture_click") => "Click",
+        (Language::ZhCn, "mouse.gesture_double_click") => "双击",
+        (Language::En, "mouse.gesture_double_click") => "Double-click",
+        (Language::ZhCn, "mouse.gesture_drag") => "拖拽",
+        (Language::En, "mouse.gesture_drag") => "Drag",
+        (Language::ZhCn, "mouse.gesture_scroll") => "滚动",
+        (Language::En, "mouse.gesture_scroll") => "Scroll",
+        (Language::ZhCn, "mouse.modifier_none") => "无",
+        (Language::En, "mouse.modifier_none") => "None",
 
         (Language::ZhCn, "general.autostart") => "开机启动",
         (Language::En, "general.autostart") => "Launch at login",
@@ -210,8 +299,16 @@ pub fn t(lang: Language, key: &str) -> &'static str {
         (Language::En, "common.close") => "Close",
         (Language::ZhCn, "common.cancel") => "取消",
         (Language::En, "common.cancel") => "Cancel",
-        (Language::ZhCn, "common.apply_immediately") => "所有修改即时生效",
-        (Language::En, "common.apply_immediately") => "All changes apply immediately",
+        (Language::ZhCn, "common.clear") => "清除",
+        (Language::En, "common.clear") => "Clear",
+        (Language::ZhCn, "common.confirm") => "确认",
+        (Language::En, "common.confirm") => "Confirm",
+        (Language::ZhCn, "common.apply_immediately") => {
+            "快捷键与鼠标操作确认后生效，其余修改即时保存"
+        }
+        (Language::En, "common.apply_immediately") => {
+            "Shortcuts and mouse bindings apply after confirmation; other changes save immediately"
+        }
 
         (Language::ZhCn, "permission.title") => "允许 ScreenScan 截屏",
         (Language::En, "permission.title") => "Allow ScreenScan to Capture",
@@ -255,10 +352,6 @@ pub fn t(lang: Language, key: &str) -> &'static str {
         (Language::En, "status.open_log_failed") => "Failed to open the log folder",
         (Language::ZhCn, "status.history_cleared") => "截图记录已清空",
         (Language::En, "status.history_cleared") => "Screenshot history cleared",
-        (Language::ZhCn, "status.capture_placeholder") => "截图流程入口（预留）",
-        (Language::En, "status.capture_placeholder") => "Capture entry point (reserved)",
-        (Language::ZhCn, "status.pin_placeholder") => "贴图流程入口（预留）",
-        (Language::En, "status.pin_placeholder") => "Pin entry point (reserved)",
 
         _ => "",
     }

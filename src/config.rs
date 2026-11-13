@@ -9,6 +9,9 @@ use anyhow::Context;
 use anyhow::Result;
 use egui::Key;
 use egui::Modifiers;
+use global_hotkey::hotkey::Code;
+use global_hotkey::hotkey::HotKey;
+use global_hotkey::hotkey::Modifiers as GlobalModifiers;
 
 use crate::font::FontChoice;
 use crate::i18n::Language;
@@ -17,16 +20,29 @@ use crate::util::path;
 
 pub const DEFAULT_FILENAME_FORMAT: &str = "screenscan_$yyyy-MM-dd_HH-mm-ss$.png";
 
-/// 覆盖层内可配置的键盘快捷键。
+/// 可配置的键盘快捷键；`enabled == false` 表示用户清除了绑定。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Shortcut {
     pub key: Key,
     pub modifiers: Modifiers,
+    pub enabled: bool,
 }
 
 impl Shortcut {
     pub const fn new(modifiers: Modifiers, key: Key) -> Self {
-        Self { key, modifiers }
+        Self {
+            key,
+            modifiers,
+            enabled: true,
+        }
+    }
+
+    pub const fn disabled() -> Self {
+        Self {
+            key: Key::Escape,
+            modifiers: Modifiers::NONE,
+            enabled: false,
+        }
     }
 
     /// 解析 `Ctrl+Shift+C` 形式；无法识别时返回 `None`。
@@ -53,10 +69,14 @@ impl Shortcut {
         Some(Self {
             key: key?,
             modifiers,
+            enabled: true,
         })
     }
 
     pub fn to_ini(self) -> String {
+        if !self.enabled {
+            return String::new();
+        }
         let mut out = String::new();
         if self.modifiers.mac_cmd {
             out.push_str("Cmd+");
@@ -74,6 +94,9 @@ impl Shortcut {
     }
 
     pub fn display(self) -> String {
+        if !self.enabled {
+            return String::new();
+        }
         let key = match self.key {
             Key::ArrowUp => "↑",
             Key::ArrowDown => "↓",
@@ -98,6 +121,9 @@ impl Shortcut {
     }
 
     pub fn matches_event(self, event: &egui::Event) -> bool {
+        if !self.enabled {
+            return false;
+        }
         match event {
             egui::Event::Key {
                 key,
@@ -108,6 +134,122 @@ impl Shortcut {
             _ => false,
         }
     }
+
+    /// 转换为系统级快捷键；不支持的按键返回 `None`。
+    pub fn to_global(self) -> Option<HotKey> {
+        if !self.enabled {
+            return None;
+        }
+        let mut modifiers = GlobalModifiers::empty();
+        if self.modifiers.mac_cmd {
+            modifiers |= GlobalModifiers::META;
+        } else if self.modifiers.ctrl || self.modifiers.command {
+            modifiers |= GlobalModifiers::CONTROL;
+        }
+        if self.modifiers.shift {
+            modifiers |= GlobalModifiers::SHIFT;
+        }
+        if self.modifiers.alt {
+            modifiers |= GlobalModifiers::ALT;
+        }
+        let code = global_code(self.key)?;
+        Some(HotKey::new(
+            (!modifiers.is_empty()).then_some(modifiers),
+            code,
+        ))
+    }
+}
+
+fn global_code(key: Key) -> Option<Code> {
+    Some(match key {
+        Key::A => Code::KeyA,
+        Key::B => Code::KeyB,
+        Key::C => Code::KeyC,
+        Key::D => Code::KeyD,
+        Key::E => Code::KeyE,
+        Key::F => Code::KeyF,
+        Key::G => Code::KeyG,
+        Key::H => Code::KeyH,
+        Key::I => Code::KeyI,
+        Key::J => Code::KeyJ,
+        Key::K => Code::KeyK,
+        Key::L => Code::KeyL,
+        Key::M => Code::KeyM,
+        Key::N => Code::KeyN,
+        Key::O => Code::KeyO,
+        Key::P => Code::KeyP,
+        Key::Q => Code::KeyQ,
+        Key::R => Code::KeyR,
+        Key::S => Code::KeyS,
+        Key::T => Code::KeyT,
+        Key::U => Code::KeyU,
+        Key::V => Code::KeyV,
+        Key::W => Code::KeyW,
+        Key::X => Code::KeyX,
+        Key::Y => Code::KeyY,
+        Key::Z => Code::KeyZ,
+        Key::Num0 => Code::Digit0,
+        Key::Num1 => Code::Digit1,
+        Key::Num2 => Code::Digit2,
+        Key::Num3 => Code::Digit3,
+        Key::Num4 => Code::Digit4,
+        Key::Num5 => Code::Digit5,
+        Key::Num6 => Code::Digit6,
+        Key::Num7 => Code::Digit7,
+        Key::Num8 => Code::Digit8,
+        Key::Num9 => Code::Digit9,
+        Key::F1 => Code::F1,
+        Key::F2 => Code::F2,
+        Key::F3 => Code::F3,
+        Key::F4 => Code::F4,
+        Key::F5 => Code::F5,
+        Key::F6 => Code::F6,
+        Key::F7 => Code::F7,
+        Key::F8 => Code::F8,
+        Key::F9 => Code::F9,
+        Key::F10 => Code::F10,
+        Key::F11 => Code::F11,
+        Key::F12 => Code::F12,
+        Key::F13 => Code::F13,
+        Key::F14 => Code::F14,
+        Key::F15 => Code::F15,
+        Key::F16 => Code::F16,
+        Key::F17 => Code::F17,
+        Key::F18 => Code::F18,
+        Key::F19 => Code::F19,
+        Key::F20 => Code::F20,
+        Key::F21 => Code::F21,
+        Key::F22 => Code::F22,
+        Key::F23 => Code::F23,
+        Key::F24 => Code::F24,
+        Key::ArrowUp => Code::ArrowUp,
+        Key::ArrowDown => Code::ArrowDown,
+        Key::ArrowLeft => Code::ArrowLeft,
+        Key::ArrowRight => Code::ArrowRight,
+        Key::Space => Code::Space,
+        Key::Enter => Code::Enter,
+        Key::Tab => Code::Tab,
+        Key::Escape => Code::Escape,
+        Key::Backspace => Code::Backspace,
+        Key::Insert => Code::Insert,
+        Key::Delete => Code::Delete,
+        Key::Home => Code::Home,
+        Key::End => Code::End,
+        Key::PageUp => Code::PageUp,
+        Key::PageDown => Code::PageDown,
+        Key::Minus => Code::Minus,
+        Key::Equals => Code::Equal,
+        Key::Comma => Code::Comma,
+        Key::Period => Code::Period,
+        Key::Slash => Code::Slash,
+        Key::Semicolon => Code::Semicolon,
+        Key::Quote => Code::Quote,
+        Key::Backslash => Code::Backslash,
+        Key::Backtick => Code::Backquote,
+        Key::OpenBracket => Code::BracketLeft,
+        Key::CloseBracket => Code::BracketRight,
+        _ => return None,
+    })
 }
 
 /// 覆盖层内可重绑定的动作。
@@ -118,19 +260,27 @@ pub enum ShortcutAction {
     MoveLeft,
     MoveRight,
     Copy,
+    Save,
     SelectAll,
     Pin,
+    Undo,
+    Redo,
+    Scan,
 }
 
 impl ShortcutAction {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 11] = [
         Self::MoveUp,
         Self::MoveDown,
         Self::MoveLeft,
         Self::MoveRight,
         Self::Copy,
+        Self::Save,
         Self::SelectAll,
         Self::Pin,
+        Self::Undo,
+        Self::Redo,
+        Self::Scan,
     ];
 
     pub fn config_key(self) -> &'static str {
@@ -140,8 +290,12 @@ impl ShortcutAction {
             Self::MoveLeft => "move_left",
             Self::MoveRight => "move_right",
             Self::Copy => "copy",
+            Self::Save => "save",
             Self::SelectAll => "select_all",
             Self::Pin => "pin",
+            Self::Undo => "undo",
+            Self::Redo => "redo",
+            Self::Scan => "scan",
         }
     }
 
@@ -152,8 +306,12 @@ impl ShortcutAction {
             Self::MoveLeft => Shortcut::new(Modifiers::NONE, Key::ArrowLeft),
             Self::MoveRight => Shortcut::new(Modifiers::NONE, Key::ArrowRight),
             Self::Copy => Shortcut::new(Modifiers::CTRL, Key::C),
+            Self::Save => Shortcut::new(Modifiers::CTRL, Key::S),
             Self::SelectAll => Shortcut::new(Modifiers::CTRL, Key::A),
             Self::Pin => Shortcut::new(Modifiers::CTRL, Key::P),
+            Self::Undo => Shortcut::new(Modifiers::CTRL, Key::Z),
+            Self::Redo => Shortcut::new(Modifiers::CTRL, Key::Y),
+            Self::Scan => Shortcut::new(Modifiers::CTRL, Key::D),
         }
     }
 
@@ -164,8 +322,12 @@ impl ShortcutAction {
             Self::MoveLeft => t(lang, "shortcuts.move_left"),
             Self::MoveRight => t(lang, "shortcuts.move_right"),
             Self::Copy => t(lang, "shortcuts.copy"),
+            Self::Save => t(lang, "shortcuts.save"),
             Self::SelectAll => t(lang, "shortcuts.select_all"),
             Self::Pin => t(lang, "shortcuts.pin"),
+            Self::Undo => t(lang, "shortcuts.undo"),
+            Self::Redo => t(lang, "shortcuts.redo"),
+            Self::Scan => t(lang, "shortcuts.scan"),
         }
     }
 }
@@ -177,8 +339,12 @@ pub struct Shortcuts {
     pub move_left: Shortcut,
     pub move_right: Shortcut,
     pub copy: Shortcut,
+    pub save: Shortcut,
     pub select_all: Shortcut,
     pub pin: Shortcut,
+    pub undo: Shortcut,
+    pub redo: Shortcut,
+    pub scan: Shortcut,
 }
 
 impl Default for Shortcuts {
@@ -189,8 +355,12 @@ impl Default for Shortcuts {
             move_left: ShortcutAction::MoveLeft.default_shortcut(),
             move_right: ShortcutAction::MoveRight.default_shortcut(),
             copy: ShortcutAction::Copy.default_shortcut(),
+            save: ShortcutAction::Save.default_shortcut(),
             select_all: ShortcutAction::SelectAll.default_shortcut(),
             pin: ShortcutAction::Pin.default_shortcut(),
+            undo: ShortcutAction::Undo.default_shortcut(),
+            redo: ShortcutAction::Redo.default_shortcut(),
+            scan: ShortcutAction::Scan.default_shortcut(),
         }
     }
 }
@@ -203,8 +373,12 @@ impl Shortcuts {
             ShortcutAction::MoveLeft => self.move_left,
             ShortcutAction::MoveRight => self.move_right,
             ShortcutAction::Copy => self.copy,
+            ShortcutAction::Save => self.save,
             ShortcutAction::SelectAll => self.select_all,
             ShortcutAction::Pin => self.pin,
+            ShortcutAction::Undo => self.undo,
+            ShortcutAction::Redo => self.redo,
+            ShortcutAction::Scan => self.scan,
         }
     }
 
@@ -215,9 +389,359 @@ impl Shortcuts {
             ShortcutAction::MoveLeft => self.move_left = shortcut,
             ShortcutAction::MoveRight => self.move_right = shortcut,
             ShortcutAction::Copy => self.copy = shortcut,
+            ShortcutAction::Save => self.save = shortcut,
             ShortcutAction::SelectAll => self.select_all = shortcut,
             ShortcutAction::Pin => self.pin = shortcut,
+            ShortcutAction::Undo => self.undo = shortcut,
+            ShortcutAction::Redo => self.redo = shortcut,
+            ShortcutAction::Scan => self.scan = shortcut,
         }
+    }
+}
+
+/// 常驻模式下由系统注册的全局快捷键。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GlobalAction {
+    Capture,
+    CaptureCopy,
+    CustomCapture,
+    Pin,
+    TogglePins,
+    NextPinGroup,
+    ToggleClickThrough,
+    Quit,
+}
+
+impl GlobalAction {
+    pub const ALL: [Self; 8] = [
+        Self::Capture,
+        Self::CaptureCopy,
+        Self::CustomCapture,
+        Self::Pin,
+        Self::TogglePins,
+        Self::NextPinGroup,
+        Self::ToggleClickThrough,
+        Self::Quit,
+    ];
+
+    pub fn config_key(self) -> &'static str {
+        match self {
+            Self::Capture => "capture",
+            Self::CaptureCopy => "capture_copy",
+            Self::CustomCapture => "custom_capture",
+            Self::Pin => "pin",
+            Self::TogglePins => "toggle_pins",
+            Self::NextPinGroup => "next_pin_group",
+            Self::ToggleClickThrough => "toggle_click_through",
+            Self::Quit => "quit",
+        }
+    }
+
+    pub fn default_shortcut(self) -> Shortcut {
+        match self {
+            Self::Capture => Shortcut::new(Modifiers::CTRL.plus(Modifiers::SHIFT), Key::S),
+            Self::CaptureCopy => Shortcut::new(Modifiers::NONE, Key::F3),
+            Self::CustomCapture => Shortcut::new(Modifiers::NONE, Key::F4),
+            Self::Pin => Shortcut::new(Modifiers::NONE, Key::F2),
+            Self::TogglePins => Shortcut::new(Modifiers::NONE, Key::F6),
+            Self::NextPinGroup => Shortcut::new(Modifiers::NONE, Key::F7),
+            Self::ToggleClickThrough => Shortcut::new(Modifiers::NONE, Key::F8),
+            Self::Quit => Shortcut::new(Modifiers::CTRL.plus(Modifiers::SHIFT), Key::Q),
+        }
+    }
+
+    pub fn label(self, lang: Language) -> &'static str {
+        match self {
+            Self::Capture => t(lang, "global.capture"),
+            Self::CaptureCopy => t(lang, "global.capture_copy"),
+            Self::CustomCapture => t(lang, "global.custom_capture"),
+            Self::Pin => t(lang, "global.pin"),
+            Self::TogglePins => t(lang, "global.toggle_pins"),
+            Self::NextPinGroup => t(lang, "global.next_pin_group"),
+            Self::ToggleClickThrough => t(lang, "global.toggle_click_through"),
+            Self::Quit => t(lang, "global.quit"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GlobalShortcuts {
+    values: [Shortcut; GlobalAction::ALL.len()],
+}
+
+impl Default for GlobalShortcuts {
+    fn default() -> Self {
+        let mut values = [Shortcut::disabled(); GlobalAction::ALL.len()];
+        for action in GlobalAction::ALL {
+            values[action as usize] = action.default_shortcut();
+        }
+        Self { values }
+    }
+}
+
+impl GlobalShortcuts {
+    pub fn get(self, action: GlobalAction) -> Shortcut {
+        self.values[action as usize]
+    }
+
+    pub fn set(&mut self, action: GlobalAction, shortcut: Shortcut) {
+        self.values[action as usize] = shortcut;
+    }
+}
+
+/// 贴图鼠标操作的输入来源。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseInput {
+    Left,
+    Middle,
+    Right,
+    WheelUp,
+    WheelDown,
+}
+
+impl MouseInput {
+    pub const ALL: [Self; 5] = [
+        Self::Left,
+        Self::Middle,
+        Self::Right,
+        Self::WheelUp,
+        Self::WheelDown,
+    ];
+
+    pub fn is_wheel(self) -> bool {
+        matches!(self, Self::WheelUp | Self::WheelDown)
+    }
+
+    pub fn ini_value(self) -> &'static str {
+        match self {
+            Self::Left => "left",
+            Self::Middle => "middle",
+            Self::Right => "right",
+            Self::WheelUp => "wheel_up",
+            Self::WheelDown => "wheel_down",
+        }
+    }
+
+    pub fn label(self, lang: Language) -> &'static str {
+        match self {
+            Self::Left => t(lang, "mouse.input_left"),
+            Self::Middle => t(lang, "mouse.input_middle"),
+            Self::Right => t(lang, "mouse.input_right"),
+            Self::WheelUp => t(lang, "mouse.input_wheel_up"),
+            Self::WheelDown => t(lang, "mouse.input_wheel_down"),
+        }
+    }
+}
+
+/// 贴图鼠标操作的触发方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseGesture {
+    Click,
+    DoubleClick,
+    Drag,
+    Scroll,
+}
+
+impl MouseGesture {
+    pub fn ini_value(self) -> &'static str {
+        match self {
+            Self::Click => "click",
+            Self::DoubleClick => "double_click",
+            Self::Drag => "drag",
+            Self::Scroll => "scroll",
+        }
+    }
+
+    pub fn label(self, lang: Language) -> &'static str {
+        match self {
+            Self::Click => t(lang, "mouse.gesture_click"),
+            Self::DoubleClick => t(lang, "mouse.gesture_double_click"),
+            Self::Drag => t(lang, "mouse.gesture_drag"),
+            Self::Scroll => t(lang, "mouse.gesture_scroll"),
+        }
+    }
+}
+
+/// 贴图窗口上的鼠标动作；顺序即冲突优先级。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PinMouseAction {
+    ZoomIn,
+    ZoomOut,
+    Move,
+    Copy,
+    Save,
+    Close,
+    ResetZoom,
+    ToggleClickThrough,
+}
+
+impl PinMouseAction {
+    pub const ALL: [Self; 8] = [
+        Self::ZoomIn,
+        Self::ZoomOut,
+        Self::Move,
+        Self::Copy,
+        Self::Save,
+        Self::Close,
+        Self::ResetZoom,
+        Self::ToggleClickThrough,
+    ];
+
+    pub fn config_key(self) -> &'static str {
+        match self {
+            Self::ZoomIn => "zoom_in",
+            Self::ZoomOut => "zoom_out",
+            Self::Move => "move",
+            Self::Copy => "copy",
+            Self::Save => "save",
+            Self::Close => "close",
+            Self::ResetZoom => "reset_zoom",
+            Self::ToggleClickThrough => "toggle_click_through",
+        }
+    }
+
+    pub fn default_binding(self) -> MouseBinding {
+        let binding = |modifiers, input, gesture| MouseBinding::new(modifiers, input, gesture);
+        match self {
+            Self::ZoomIn => binding(Modifiers::NONE, MouseInput::WheelUp, MouseGesture::Scroll),
+            Self::ZoomOut => binding(Modifiers::NONE, MouseInput::WheelDown, MouseGesture::Scroll),
+            Self::Move => binding(Modifiers::NONE, MouseInput::Middle, MouseGesture::Drag),
+            Self::Copy => binding(Modifiers::CTRL, MouseInput::Left, MouseGesture::Click),
+            Self::Save => binding(Modifiers::CTRL, MouseInput::Middle, MouseGesture::Click),
+            Self::Close => binding(Modifiers::NONE, MouseInput::Left, MouseGesture::DoubleClick),
+            Self::ResetZoom => binding(Modifiers::NONE, MouseInput::Middle, MouseGesture::Click),
+            Self::ToggleClickThrough => binding(
+                Modifiers::CTRL.plus(Modifiers::SHIFT),
+                MouseInput::Middle,
+                MouseGesture::Click,
+            ),
+        }
+    }
+
+    pub fn label(self, lang: Language) -> &'static str {
+        match self {
+            Self::ZoomIn => t(lang, "mouse.zoom_in"),
+            Self::ZoomOut => t(lang, "mouse.zoom_out"),
+            Self::Move => t(lang, "mouse.move"),
+            Self::Copy => t(lang, "mouse.copy"),
+            Self::Save => t(lang, "mouse.save"),
+            Self::Close => t(lang, "mouse.close"),
+            Self::ResetZoom => t(lang, "mouse.reset_zoom"),
+            Self::ToggleClickThrough => t(lang, "mouse.toggle_click_through"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MouseBinding {
+    pub modifiers: Modifiers,
+    pub input: MouseInput,
+    pub gesture: MouseGesture,
+    pub enabled: bool,
+}
+
+impl MouseBinding {
+    pub const fn new(modifiers: Modifiers, input: MouseInput, gesture: MouseGesture) -> Self {
+        Self {
+            modifiers,
+            input,
+            gesture,
+            enabled: true,
+        }
+    }
+
+    pub const fn disabled() -> Self {
+        Self {
+            modifiers: Modifiers::NONE,
+            input: MouseInput::Left,
+            gesture: MouseGesture::Click,
+            enabled: false,
+        }
+    }
+
+    /// 解析 `Ctrl+wheel_up+scroll` 形式；无法识别时返回 `None`。
+    pub fn parse(text: &str) -> Option<Self> {
+        let mut modifiers = Modifiers::NONE;
+        let mut input = None;
+        let mut gesture = None;
+        for part in text
+            .split('+')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+        {
+            match part.to_ascii_lowercase().as_str() {
+                "ctrl" | "control" => {
+                    modifiers.ctrl = true;
+                    modifiers.command = true;
+                }
+                "shift" => modifiers.shift = true,
+                "alt" | "option" => modifiers.alt = true,
+                "left" => input = Some(MouseInput::Left),
+                "middle" => input = Some(MouseInput::Middle),
+                "right" => input = Some(MouseInput::Right),
+                "wheel_up" => input = Some(MouseInput::WheelUp),
+                "wheel_down" => input = Some(MouseInput::WheelDown),
+                "click" => gesture = Some(MouseGesture::Click),
+                "double_click" | "double" => gesture = Some(MouseGesture::DoubleClick),
+                "drag" => gesture = Some(MouseGesture::Drag),
+                "scroll" => gesture = Some(MouseGesture::Scroll),
+                _ => return None,
+            }
+        }
+        Some(Self {
+            modifiers,
+            input: input?,
+            gesture: gesture?,
+            enabled: true,
+        })
+    }
+
+    pub fn to_ini(self) -> String {
+        if !self.enabled {
+            return String::new();
+        }
+        let mut parts = Vec::with_capacity(4);
+        if self.modifiers.ctrl || self.modifiers.command {
+            parts.push("Ctrl");
+        }
+        if self.modifiers.shift {
+            parts.push("Shift");
+        }
+        if self.modifiers.alt {
+            parts.push("Alt");
+        }
+        parts.push(self.input.ini_value());
+        parts.push(self.gesture.ini_value());
+        parts.join("+")
+    }
+
+    pub fn matches_modifiers(self, modifiers: Modifiers) -> bool {
+        self.enabled && self.modifiers.matches_exact(modifiers)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PinMouseBindings {
+    values: [MouseBinding; PinMouseAction::ALL.len()],
+}
+
+impl Default for PinMouseBindings {
+    fn default() -> Self {
+        let mut values = [MouseBinding::disabled(); PinMouseAction::ALL.len()];
+        for action in PinMouseAction::ALL {
+            values[action as usize] = action.default_binding();
+        }
+        Self { values }
+    }
+}
+
+impl PinMouseBindings {
+    pub fn get(self, action: PinMouseAction) -> MouseBinding {
+        self.values[action as usize]
+    }
+
+    pub fn set(&mut self, action: PinMouseAction, binding: MouseBinding) {
+        self.values[action as usize] = binding;
     }
 }
 
@@ -294,6 +818,10 @@ pub struct Config {
     pub filename_format: String,
     pub language: Language,
     pub shortcuts: Shortcuts,
+    pub global_shortcuts: GlobalShortcuts,
+    pub pin_mouse: PinMouseBindings,
+    /// 自定义截屏的倒计时（秒）。
+    pub capture_delay: u32,
 }
 
 impl Default for Config {
@@ -307,6 +835,9 @@ impl Default for Config {
             filename_format: DEFAULT_FILENAME_FORMAT.to_owned(),
             language: Language::ZhCn,
             shortcuts: Shortcuts::default(),
+            global_shortcuts: GlobalShortcuts::default(),
+            pin_mouse: PinMouseBindings::default(),
+            capture_delay: 3,
         }
     }
 }
@@ -345,20 +876,40 @@ impl Config {
             .unwrap_or(DEFAULT_FILENAME_FORMAT)
             .to_owned();
 
-        let shortcut = |action: ShortcutAction| {
-            get("shortcuts", action.config_key())
-                .and_then(Shortcut::parse)
-                .unwrap_or(action.default_shortcut())
+        let shortcut = |section: &str, key: &str, default: Shortcut| match get(section, key) {
+            Some(value) if value.trim().is_empty() => Shortcut::disabled(),
+            Some(value) => Shortcut::parse(value).unwrap_or(default),
+            None => default,
         };
-        let shortcuts = Shortcuts {
-            move_up: shortcut(ShortcutAction::MoveUp),
-            move_down: shortcut(ShortcutAction::MoveDown),
-            move_left: shortcut(ShortcutAction::MoveLeft),
-            move_right: shortcut(ShortcutAction::MoveRight),
-            copy: shortcut(ShortcutAction::Copy),
-            select_all: shortcut(ShortcutAction::SelectAll),
-            pin: shortcut(ShortcutAction::Pin),
-        };
+        let mut shortcuts = Shortcuts::default();
+        for action in ShortcutAction::ALL {
+            shortcuts.set(
+                action,
+                shortcut("shortcuts", action.config_key(), action.default_shortcut()),
+            );
+        }
+        let mut global_shortcuts = GlobalShortcuts::default();
+        for action in GlobalAction::ALL {
+            global_shortcuts.set(
+                action,
+                shortcut(
+                    "global_shortcuts",
+                    action.config_key(),
+                    action.default_shortcut(),
+                ),
+            );
+        }
+        let mut pin_mouse = PinMouseBindings::default();
+        for action in PinMouseAction::ALL {
+            if let Some(value) = get("pin_mouse", action.config_key()) {
+                let binding = if value.trim().is_empty() {
+                    MouseBinding::disabled()
+                } else {
+                    MouseBinding::parse(value).unwrap_or(action.default_binding())
+                };
+                pin_mouse.set(action, binding);
+            }
+        }
 
         Self {
             autostart: parse_bool(get("general", "autostart"), false),
@@ -369,6 +920,12 @@ impl Config {
             filename_format,
             language: Language::parse(get("appearance", "language").unwrap_or("zh-CN")),
             shortcuts,
+            global_shortcuts,
+            pin_mouse,
+            capture_delay: get("general", "capture_delay")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(3)
+                .min(60),
         }
     }
 
@@ -377,6 +934,7 @@ impl Config {
         out.push_str("[general]\n");
         out.push_str(&format!("autostart={}\n", self.autostart));
         out.push_str(&format!("auto_backup={}\n", self.auto_backup));
+        out.push_str(&format!("capture_delay={}\n", self.capture_delay));
         out.push_str("\n[interface]\n");
         if let Some(font) = &self.font {
             out.push_str(&format!("font_path={}\n", font.path.display()));
@@ -401,6 +959,22 @@ impl Config {
                 "{}={}\n",
                 action.config_key(),
                 self.shortcuts.get(action).to_ini()
+            ));
+        }
+        out.push_str("\n[global_shortcuts]\n");
+        for action in GlobalAction::ALL {
+            out.push_str(&format!(
+                "{}={}\n",
+                action.config_key(),
+                self.global_shortcuts.get(action).to_ini()
+            ));
+        }
+        out.push_str("\n[pin_mouse]\n");
+        for action in PinMouseAction::ALL {
+            out.push_str(&format!(
+                "{}={}\n",
+                action.config_key(),
+                self.pin_mouse.get(action).to_ini()
             ));
         }
         out
@@ -679,5 +1253,64 @@ mod tests {
         let parsed = Config::from_ini(&config.to_ini());
         assert_eq!(parsed.shortcuts.pin, config.shortcuts.pin);
         assert_eq!(parsed.shortcuts.copy.key, Key::C);
+    }
+
+    #[test]
+    fn disabled_shortcut_roundtrip() {
+        let mut config = Config::default();
+        config
+            .global_shortcuts
+            .set(GlobalAction::Pin, Shortcut::disabled());
+        let parsed = Config::from_ini(&config.to_ini());
+        assert!(!parsed.global_shortcuts.get(GlobalAction::Pin).enabled);
+        assert!(parsed.global_shortcuts.get(GlobalAction::Capture).enabled);
+    }
+
+    #[test]
+    fn global_shortcuts_accept_common_keys() {
+        for key in [Key::F1, Key::F12, Key::S, Key::Num3, Key::ArrowUp] {
+            let shortcut = Shortcut::new(Modifiers::CTRL, key);
+            assert!(shortcut.to_global().is_some(), "{key:?}");
+        }
+        assert!(
+            Shortcut::new(Modifiers::NONE, Key::Copy)
+                .to_global()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn mouse_binding_roundtrip() {
+        let binding = MouseBinding::parse("Ctrl+Shift+wheel_up+scroll").expect("valid binding");
+        assert_eq!(binding.input, MouseInput::WheelUp);
+        assert_eq!(binding.gesture, MouseGesture::Scroll);
+        assert!(binding.modifiers.ctrl && binding.modifiers.shift);
+        assert_eq!(binding.to_ini(), "Ctrl+Shift+wheel_up+scroll");
+        assert!(MouseBinding::parse("Ctrl+left").is_none());
+    }
+
+    #[test]
+    fn ini_roundtrip_keeps_mouse_and_global_settings() {
+        let mut config = Config::default();
+        config.pin_mouse.set(
+            PinMouseAction::Close,
+            MouseBinding::new(Modifiers::ALT, MouseInput::Right, MouseGesture::Click),
+        );
+        config
+            .global_shortcuts
+            .set(GlobalAction::Quit, Shortcut::disabled());
+        config
+            .pin_mouse
+            .set(PinMouseAction::Move, MouseBinding::disabled());
+        config.capture_delay = 7;
+
+        let parsed = Config::from_ini(&config.to_ini());
+        assert_eq!(
+            parsed.pin_mouse.get(PinMouseAction::Close),
+            config.pin_mouse.get(PinMouseAction::Close)
+        );
+        assert!(!parsed.pin_mouse.get(PinMouseAction::Move).enabled);
+        assert!(!parsed.global_shortcuts.get(GlobalAction::Quit).enabled);
+        assert_eq!(parsed.capture_delay, 7);
     }
 }

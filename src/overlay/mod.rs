@@ -98,6 +98,8 @@ pub struct OverlayState {
     pub filename_template: String,
     /// 选区阶段的键盘快捷键（来自设置）。
     pub shortcuts: Shortcuts,
+    /// 「截屏并自动复制」：选区确认后立即复制并关闭。
+    pub auto_copy: bool,
 }
 
 impl OverlayState {
@@ -505,23 +507,44 @@ impl OverlayState {
             }
             self.anchor = None;
             self.drag_moved = false;
+
+            // 「截屏并自动复制」：确认选区后直接复制，不再进入标注。
+            if self.auto_copy && self.state == State::Selected {
+                self.perform_action(true);
+            }
         }
     }
 
-    /// 选区阶段的键盘快捷键：移动、复制、全屏、贴图。
+    /// 选区阶段的键盘快捷键：移动、复制、保存、全屏、贴图、撤销、扫描。
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         if matches!(self.state, State::Selecting | State::Done) {
             return;
         }
         let shortcuts = self.shortcuts;
-        let (copy, pin, select_all, move_up, move_down, move_left, move_right) = ctx.input(|i| {
+        let (
+            copy,
+            save,
+            pin,
+            select_all,
+            undo,
+            redo,
+            scan,
+            move_up,
+            move_down,
+            move_left,
+            move_right,
+        ) = ctx.input(|i| {
             let hit = |shortcut: crate::config::Shortcut| {
                 i.events.iter().any(|event| shortcut.matches_event(event))
             };
             (
                 hit(shortcuts.copy),
+                hit(shortcuts.save),
                 hit(shortcuts.pin),
                 hit(shortcuts.select_all),
+                hit(shortcuts.undo),
+                hit(shortcuts.redo),
+                hit(shortcuts.scan),
                 hit(shortcuts.move_up),
                 hit(shortcuts.move_down),
                 hit(shortcuts.move_left),
@@ -533,8 +556,24 @@ impl OverlayState {
             self.perform_action(true);
             return;
         }
+        if save {
+            self.perform_action(false);
+            return;
+        }
         if pin {
             self.perform_pin();
+            return;
+        }
+        if undo {
+            self.board.undo();
+            return;
+        }
+        if redo {
+            self.board.redo();
+            return;
+        }
+        if scan {
+            self.perform_scan();
             return;
         }
         if select_all {
@@ -675,6 +714,7 @@ impl Overlay {
         proxy: EventLoopProxy<UserEvent>,
         filename_template: String,
         shortcuts: Shortcuts,
+        auto_copy: bool,
     ) -> anyhow::Result<Self> {
         // 按名称（优先）或位置/尺寸匹配 winit 显示器，使用「按显示器全屏」
         // 让覆盖层精确铺满对应屏幕（Wayland 无法绝对定位时同样有效）。
@@ -757,6 +797,7 @@ impl Overlay {
             proxy,
             filename_template,
             shortcuts,
+            auto_copy,
         };
 
         // X11：首帧画好后再显示窗口，避免启动黑屏/闪烁。

@@ -1,4 +1,4 @@
-//! 首选项窗口：七个标签页，所有修改即时生效。
+//! 首选项窗口：七个标签页；快捷键与鼠标操作需确认，其余修改即时生效。
 
 use std::path::Path;
 use std::path::PathBuf;
@@ -14,7 +14,14 @@ use winit::window::WindowId;
 
 use crate::config::Config;
 use crate::config::DEFAULT_FILENAME_FORMAT;
+use crate::config::GlobalAction;
+use crate::config::GlobalShortcuts;
 use crate::config::LogLevel;
+use crate::config::MouseBinding;
+use crate::config::MouseGesture;
+use crate::config::MouseInput;
+use crate::config::PinMouseAction;
+use crate::config::PinMouseBindings;
 use crate::config::Shortcut;
 use crate::config::ShortcutAction;
 use crate::config::Shortcuts;
@@ -40,12 +47,16 @@ pub enum Effect {
     Autostart(bool),
     LogLevel,
     OpenLogDir,
+    /// 全局快捷键配置变化，需要重新注册。
+    GlobalShortcuts,
+    /// 贴图鼠标配置变化，需要同步到已有贴图窗口。
+    PinMouse,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
     General,
-    Shortcuts,
+    Control,
     Interface,
     Output,
     Language,
@@ -56,7 +67,7 @@ enum Tab {
 impl Tab {
     const ALL: [Self; 7] = [
         Self::General,
-        Self::Shortcuts,
+        Self::Control,
         Self::Interface,
         Self::Output,
         Self::Language,
@@ -67,7 +78,7 @@ impl Tab {
     fn label(self, lang: Language) -> &'static str {
         match self {
             Self::General => t(lang, "tab.general"),
-            Self::Shortcuts => t(lang, "tab.shortcuts"),
+            Self::Control => t(lang, "tab.control"),
             Self::Interface => t(lang, "tab.interface"),
             Self::Output => t(lang, "tab.output"),
             Self::Language => t(lang, "tab.language"),
@@ -75,6 +86,37 @@ impl Tab {
             Self::About => t(lang, "tab.about"),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ControlSection {
+    Global,
+    App,
+    Mouse,
+}
+
+impl ControlSection {
+    const ALL: [Self; 3] = [Self::Global, Self::App, Self::Mouse];
+
+    fn label(self, lang: Language) -> &'static str {
+        match self {
+            Self::Global => t(lang, "control.global"),
+            Self::App => t(lang, "control.app"),
+            Self::Mouse => t(lang, "control.mouse"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShortcutTarget {
+    Global(GlobalAction),
+    App(ShortcutAction),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Recording {
+    target: ShortcutTarget,
+    candidate: Option<Shortcut>,
 }
 
 struct Preview {
@@ -85,13 +127,16 @@ struct Preview {
 pub struct SettingsWindow {
     rendered: RenderedWindow,
     tab: Tab,
+    control_section: ControlSection,
     font_picker_open: bool,
     font_filter: String,
     language_picker_open: bool,
     preview: Option<Preview>,
     status: Option<String>,
-    /// 正在等待用户按下新快捷键的动作。
-    recording: Option<ShortcutAction>,
+    /// 正在等待用户按下新快捷键的行。
+    recording: Option<Recording>,
+    /// 鼠标页尚未确认的修改，按 `PinMouseAction::ALL` 的顺序存放。
+    mouse_drafts: [Option<MouseBinding>; PinMouseAction::ALL.len()],
 }
 
 impl SettingsWindow {
@@ -118,12 +163,14 @@ impl SettingsWindow {
         Ok(Self {
             rendered,
             tab: Tab::General,
+            control_section: ControlSection::Global,
             font_picker_open: false,
             font_filter: String::new(),
             language_picker_open: false,
             preview: None,
             status: None,
             recording: None,
+            mouse_drafts: [None; PinMouseAction::ALL.len()],
         })
     }
 
@@ -184,26 +231,28 @@ impl SettingsWindow {
         update_preview(&mut self.preview, config, &ctx);
 
         let mut effects = Vec::new();
-        if capture_shortcut(&ctx, &mut self.recording, config) {
-            effects.push(Effect::Save);
-        }
+        record_shortcut(&ctx, &mut self.recording);
 
         let Self {
             rendered,
             tab,
+            control_section,
             font_picker_open,
             font_filter,
             language_picker_open,
             preview,
             status,
             recording,
+            mouse_drafts,
         } = self;
 
         rendered.render(|ui| {
             settings_ui(
                 ui,
                 tab,
+                control_section,
                 recording,
+                mouse_drafts,
                 font_picker_open,
                 font_filter,
                 language_picker_open,
@@ -220,15 +269,12 @@ impl SettingsWindow {
     }
 }
 
-/// 录制中的快捷键：Esc 取消，其余按键写入配置。
-fn capture_shortcut(
-    ctx: &egui::Context,
-    recording: &mut Option<ShortcutAction>,
-    config: &mut Config,
-) -> bool {
-    let Some(action) = *recording else {
-        return false;
+/// 录制中的快捷键：Esc 取消，其余按键成为待确认的候选值。
+fn record_shortcut(ctx: &egui::Context, recording: &mut Option<Recording>) {
+    let Some(record) = recording.as_ref() else {
+        return;
     };
+    let target = record.target;
     let mut captured = None;
     let mut cancel = false;
     ctx.input(|i| {
@@ -246,21 +292,21 @@ fn capture_shortcut(
             if *key == egui::Key::Escape && modifiers.is_none() {
                 cancel = true;
             } else {
-                captured = Some(Shortcut::new(*modifiers, *key));
+                let shortcut = Shortcut::new(*modifiers, *key);
+                // 系统级注册不支持的按键直接忽略，避免出现永远不生效的绑定。
+                if matches!(target, ShortcutTarget::Global(_)) && shortcut.to_global().is_none() {
+                    continue;
+                }
+                captured = Some(shortcut);
             }
             break;
         }
     });
     if cancel {
         *recording = None;
-        return false;
+    } else if let Some(shortcut) = captured {
+        recording.as_mut().expect("recording exists").candidate = Some(shortcut);
     }
-    let Some(shortcut) = captured else {
-        return false;
-    };
-    config.shortcuts.set(action, shortcut);
-    *recording = None;
-    true
 }
 
 fn update_preview(preview: &mut Option<Preview>, config: &Config, ctx: &egui::Context) {
@@ -303,7 +349,9 @@ fn update_preview(preview: &mut Option<Preview>, config: &Config, ctx: &egui::Co
 fn settings_ui(
     ui: &mut egui::Ui,
     tab: &mut Tab,
-    recording: &mut Option<ShortcutAction>,
+    control_section: &mut ControlSection,
+    recording: &mut Option<Recording>,
+    mouse_drafts: &mut [Option<MouseBinding>],
     font_picker_open: &mut bool,
     font_filter: &mut String,
     language_picker_open: &mut bool,
@@ -348,7 +396,14 @@ fn settings_ui(
                 .max_height(content_height)
                 .show(ui, |ui| match *tab {
                     Tab::General => general_tab(ui, config, config_path, effects),
-                    Tab::Shortcuts => shortcuts_tab(ui, config, recording, effects),
+                    Tab::Control => control_tab(
+                        ui,
+                        config,
+                        control_section,
+                        recording,
+                        mouse_drafts,
+                        effects,
+                    ),
                     Tab::Interface => interface_tab(
                         ui,
                         config,
@@ -445,40 +500,411 @@ fn general_tab(
     );
 }
 
-fn shortcuts_tab(
+fn control_tab(
     ui: &mut egui::Ui,
     config: &mut Config,
-    recording: &mut Option<ShortcutAction>,
+    section: &mut ControlSection,
+    recording: &mut Option<Recording>,
+    mouse_drafts: &mut [Option<MouseBinding>],
     effects: &mut Vec<Effect>,
 ) {
     let lang = config.language;
-    egui::Grid::new("settings_shortcuts")
-        .num_columns(2)
-        .spacing([24.0, 12.0])
+    ui.horizontal_wrapped(|ui| {
+        for candidate in ControlSection::ALL {
+            if ui
+                .selectable_label(*section == candidate, candidate.label(lang))
+                .clicked()
+            {
+                *section = candidate;
+                *recording = None;
+            }
+        }
+    });
+    ui.add_space(4.0);
+    ui.separator();
+    ui.add_space(8.0);
+
+    match *section {
+        ControlSection::Global => global_shortcuts_ui(ui, config, recording, effects),
+        ControlSection::App => app_shortcuts_ui(ui, config, recording, effects),
+        ControlSection::Mouse => mouse_ui(ui, config, mouse_drafts, effects),
+    }
+}
+
+fn global_shortcuts_ui(
+    ui: &mut egui::Ui,
+    config: &mut Config,
+    recording: &mut Option<Recording>,
+    effects: &mut Vec<Effect>,
+) {
+    let lang = config.language;
+    egui::Grid::new("settings_global_shortcuts")
+        .num_columns(4)
+        .spacing([10.0, 10.0])
+        .show(ui, |ui| {
+            for action in GlobalAction::ALL {
+                shortcut_row(
+                    ui,
+                    config,
+                    action.label(lang),
+                    action,
+                    recording,
+                    effects,
+                    |config, shortcut| config.global_shortcuts.set(action, shortcut),
+                    true,
+                );
+            }
+        });
+
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        ui.label(t(lang, "control.delay"));
+        if ui
+            .add(
+                egui::DragValue::new(&mut config.capture_delay)
+                    .range(0..=60)
+                    .suffix(format!(" {}", t(lang, "control.seconds"))),
+            )
+            .changed()
+        {
+            effects.push(Effect::Save);
+        }
+    });
+    ui.add_space(4.0);
+    ui.label(RichText::new(t(lang, "control.global_hint")).small().weak());
+    ui.add_space(8.0);
+    if ui.button(t(lang, "control.restore")).clicked() {
+        config.global_shortcuts = GlobalShortcuts::default();
+        config.capture_delay = 3;
+        *recording = None;
+        effects.push(Effect::Save);
+        effects.push(Effect::GlobalShortcuts);
+    }
+}
+
+fn app_shortcuts_ui(
+    ui: &mut egui::Ui,
+    config: &mut Config,
+    recording: &mut Option<Recording>,
+    effects: &mut Vec<Effect>,
+) {
+    let lang = config.language;
+    ui.label(RichText::new(t(lang, "control.internal")).strong());
+    ui.add_space(4.0);
+    egui::Grid::new("settings_app_shortcuts")
+        .num_columns(4)
+        .spacing([10.0, 10.0])
         .show(ui, |ui| {
             for action in ShortcutAction::ALL {
-                ui.label(action.label(lang));
-                let text = if *recording == Some(action) {
-                    t(lang, "shortcuts.recording").to_owned()
+                shortcut_row(
+                    ui,
+                    config,
+                    action.label(lang),
+                    action,
+                    recording,
+                    effects,
+                    |config, shortcut| config.shortcuts.set(action, shortcut),
+                    false,
+                );
+            }
+        });
+
+    ui.add_space(8.0);
+    ui.label(RichText::new(t(lang, "control.app_hint")).small().weak());
+    ui.add_space(8.0);
+    if ui.button(t(lang, "control.restore")).clicked() {
+        config.shortcuts = Shortcuts::default();
+        *recording = None;
+        effects.push(Effect::Save);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn shortcut_row(
+    ui: &mut egui::Ui,
+    config: &mut Config,
+    label: &str,
+    target: impl Into<ShortcutTarget>,
+    recording: &mut Option<Recording>,
+    effects: &mut Vec<Effect>,
+    set: impl Fn(&mut Config, Shortcut),
+    global: bool,
+) {
+    let lang = config.language;
+    let target = target.into();
+    let current = match target {
+        ShortcutTarget::Global(action) => config.global_shortcuts.get(action),
+        ShortcutTarget::App(action) => config.shortcuts.get(action),
+    };
+    let is_recording = recording.as_ref().is_some_and(|r| r.target == target);
+    let candidate = recording.as_ref().and_then(|r| r.candidate);
+    let text = if is_recording {
+        candidate
+            .map(Shortcut::display)
+            .filter(|text| !text.is_empty())
+            .unwrap_or_else(|| t(lang, "shortcuts.recording").to_owned())
+    } else if current.enabled {
+        current.display()
+    } else {
+        t(lang, "shortcuts.unset").to_owned()
+    };
+
+    ui.label(label);
+    let button =
+        egui::Button::new(RichText::new(text).monospace()).min_size(egui::vec2(190.0, 28.0));
+    if ui.add(button).clicked() {
+        *recording = Some(Recording {
+            target,
+            candidate: None,
+        });
+    }
+
+    let clear = ui
+        .add(egui::Button::new("×").min_size(egui::vec2(28.0, 28.0)))
+        .on_hover_text(t(lang, "common.clear"));
+    if clear.clicked() {
+        set(config, Shortcut::disabled());
+        *recording = None;
+        effects.push(Effect::Save);
+        if global {
+            effects.push(Effect::GlobalShortcuts);
+        }
+    }
+
+    let confirm = confirm_button(
+        ui,
+        is_recording && candidate.is_some(),
+        t(lang, "common.confirm"),
+    );
+    if confirm.clicked() {
+        if let Some(candidate) = candidate {
+            set(config, candidate);
+            effects.push(Effect::Save);
+            if global {
+                effects.push(Effect::GlobalShortcuts);
+            }
+        }
+        *recording = None;
+    }
+    ui.end_row();
+}
+
+impl From<GlobalAction> for ShortcutTarget {
+    fn from(action: GlobalAction) -> Self {
+        Self::Global(action)
+    }
+}
+
+impl From<ShortcutAction> for ShortcutTarget {
+    fn from(action: ShortcutAction) -> Self {
+        Self::App(action)
+    }
+}
+
+fn mouse_ui(
+    ui: &mut egui::Ui,
+    config: &mut Config,
+    mouse_drafts: &mut [Option<MouseBinding>],
+    effects: &mut Vec<Effect>,
+) {
+    let lang = config.language;
+    egui::Grid::new("settings_pin_mouse")
+        .num_columns(6)
+        .spacing([10.0, 10.0])
+        .show(ui, |ui| {
+            for action in PinMouseAction::ALL {
+                let index = PinMouseAction::ALL
+                    .iter()
+                    .position(|candidate| *candidate == action)
+                    .expect("action is listed");
+                let mut binding = mouse_drafts[index].unwrap_or(config.pin_mouse.get(action));
+                let mut changed = false;
+                let unset = !binding.enabled && mouse_drafts[index].is_none();
+
+                if unset {
+                    ui.label(format!(
+                        "{} ({})",
+                        action.label(lang),
+                        t(lang, "shortcuts.unset")
+                    ));
                 } else {
-                    config.shortcuts.get(action).display()
-                };
-                let button = egui::Button::new(RichText::new(text).monospace())
-                    .min_size(egui::vec2(180.0, 28.0));
-                if ui.add(button).clicked() {
-                    *recording = Some(action);
+                    ui.label(action.label(lang));
+                }
+
+                egui::ComboBox::from_id_salt(("mouse_modifiers", action.config_key()))
+                    .selected_text(modifier_text(binding.modifiers, lang))
+                    .width(92.0)
+                    .show_ui(ui, |ui| {
+                        for (text, modifiers) in modifier_options(lang) {
+                            if ui
+                                .selectable_label(binding.modifiers == modifiers, text)
+                                .clicked()
+                            {
+                                binding.modifiers = modifiers;
+                                changed = true;
+                            }
+                        }
+                    });
+
+                egui::ComboBox::from_id_salt(("mouse_input", action.config_key()))
+                    .selected_text(binding.input.label(lang))
+                    .width(92.0)
+                    .show_ui(ui, |ui| {
+                        for input in MouseInput::ALL {
+                            if ui
+                                .selectable_label(binding.input == input, input.label(lang))
+                                .clicked()
+                            {
+                                binding.input = input;
+                                changed = true;
+                            }
+                        }
+                    });
+
+                if binding.input.is_wheel() {
+                    if binding.gesture != MouseGesture::Scroll {
+                        binding.gesture = MouseGesture::Scroll;
+                        changed = true;
+                    }
+                    ui.add_enabled(
+                        false,
+                        egui::Button::new(MouseGesture::Scroll.label(lang))
+                            .min_size(egui::vec2(90.0, 24.0)),
+                    );
+                } else {
+                    if binding.gesture == MouseGesture::Scroll {
+                        binding.gesture = MouseGesture::Click;
+                        changed = true;
+                    }
+                    egui::ComboBox::from_id_salt(("mouse_gesture", action.config_key()))
+                        .selected_text(binding.gesture.label(lang))
+                        .width(90.0)
+                        .show_ui(ui, |ui| {
+                            for gesture in [
+                                MouseGesture::Click,
+                                MouseGesture::DoubleClick,
+                                MouseGesture::Drag,
+                            ] {
+                                if ui
+                                    .selectable_label(
+                                        binding.gesture == gesture,
+                                        gesture.label(lang),
+                                    )
+                                    .clicked()
+                                {
+                                    binding.gesture = gesture;
+                                    changed = true;
+                                }
+                            }
+                        });
+                }
+
+                if changed {
+                    binding.enabled = true;
+                    mouse_drafts[index] = Some(binding);
+                }
+
+                let clear = ui
+                    .add(egui::Button::new("×").min_size(egui::vec2(28.0, 28.0)))
+                    .on_hover_text(t(lang, "common.clear"));
+                if clear.clicked() {
+                    mouse_drafts[index] = None;
+                    config.pin_mouse.set(action, MouseBinding::disabled());
+                    effects.push(Effect::Save);
+                    effects.push(Effect::PinMouse);
+                }
+
+                let confirm =
+                    confirm_button(ui, mouse_drafts[index].is_some(), t(lang, "common.confirm"));
+                if confirm.clicked()
+                    && let Some(binding) = mouse_drafts[index].take()
+                {
+                    config.pin_mouse.set(action, binding);
+                    effects.push(Effect::Save);
+                    effects.push(Effect::PinMouse);
                 }
                 ui.end_row();
             }
         });
 
     ui.add_space(8.0);
-    ui.label(RichText::new(t(lang, "shortcuts.hint")).small().weak());
-    ui.add_space(6.0);
-    if ui.button(t(lang, "shortcuts.restore")).clicked() {
-        config.shortcuts = Shortcuts::default();
-        *recording = None;
+    ui.label(RichText::new(t(lang, "control.mouse_hint")).small().weak());
+    ui.add_space(8.0);
+    if ui.button(t(lang, "control.restore")).clicked() {
+        config.pin_mouse = PinMouseBindings::default();
+        mouse_drafts.fill(None);
         effects.push(Effect::Save);
+        effects.push(Effect::PinMouse);
+    }
+}
+
+/// 自绘对勾：DroidSansFallback 等中文字体没有 ✓ 字形，用线条保证各平台可见。
+fn confirm_button(ui: &mut egui::Ui, enabled: bool, hover: &str) -> egui::Response {
+    let response = ui
+        .add_enabled(
+            enabled,
+            egui::Button::new("").min_size(egui::vec2(28.0, 28.0)),
+        )
+        .on_hover_text(hover);
+    if ui.is_rect_visible(response.rect) {
+        let rect = response.rect;
+        let color = if enabled {
+            ui.visuals().text_color()
+        } else {
+            ui.visuals().weak_text_color().gamma_multiply(0.4)
+        };
+        let stroke = egui::Stroke::new(1.8, color);
+        let center = rect.center();
+        let size = rect.size();
+        let start = center + egui::vec2(-size.x * 0.16, 0.0);
+        let middle = center + egui::vec2(-size.x * 0.03, size.y * 0.14);
+        let end = center + egui::vec2(size.x * 0.18, -size.y * 0.15);
+        let painter = ui.painter();
+        painter.line_segment([start, middle], stroke);
+        painter.line_segment([middle, end], stroke);
+    }
+    response
+}
+
+fn modifier_options(lang: Language) -> [(&'static str, egui::Modifiers); 8] {
+    [
+        (t(lang, "mouse.modifier_none"), egui::Modifiers::NONE),
+        ("Ctrl", egui::Modifiers::CTRL),
+        ("Shift", egui::Modifiers::SHIFT),
+        ("Alt", egui::Modifiers::ALT),
+        (
+            "Ctrl+Shift",
+            egui::Modifiers::CTRL.plus(egui::Modifiers::SHIFT),
+        ),
+        ("Ctrl+Alt", egui::Modifiers::CTRL.plus(egui::Modifiers::ALT)),
+        (
+            "Shift+Alt",
+            egui::Modifiers::SHIFT.plus(egui::Modifiers::ALT),
+        ),
+        (
+            "Ctrl+Shift+Alt",
+            egui::Modifiers::CTRL
+                .plus(egui::Modifiers::SHIFT)
+                .plus(egui::Modifiers::ALT),
+        ),
+    ]
+}
+
+fn modifier_text(modifiers: egui::Modifiers, lang: Language) -> String {
+    let mut parts = Vec::with_capacity(3);
+    if modifiers.ctrl || modifiers.command {
+        parts.push("Ctrl");
+    }
+    if modifiers.shift {
+        parts.push("Shift");
+    }
+    if modifiers.alt {
+        parts.push("Alt");
+    }
+    if parts.is_empty() {
+        t(lang, "mouse.modifier_none").to_owned()
+    } else {
+        parts.join("+")
     }
 }
 

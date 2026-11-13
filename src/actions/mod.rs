@@ -27,3 +27,15 @@ pub fn copy_text(text: &str) -> anyhow::Result<()> {
     let mut clipboard = arboard::Clipboard::new().map_err(|e| anyhow::anyhow!("{e}"))?;
     clipboard.set_text(text).map_err(|e| anyhow::anyhow!("{e}"))
 }
+
+/// 读取剪贴板中的图片（全局「贴图」快捷键用）。
+pub fn read_clipboard_image() -> anyhow::Result<RgbaImage> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|e| anyhow::anyhow!("{e}"))?;
+    let image = clipboard.get_image().map_err(|e| anyhow::anyhow!("{e}"))?;
+    RgbaImage::from_raw(
+        image.width as u32,
+        image.height as u32,
+        image.bytes.into_owned(),
+    )
+    .ok_or_else(|| anyhow::anyhow!("剪贴板图片数据无效"))
+}

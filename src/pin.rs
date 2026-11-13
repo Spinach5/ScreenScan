@@ -9,6 +9,7 @@
 use std::path::PathBuf;
 
 use egui::Color32;
+use egui::Modifiers;
 use egui::Rect;
 use egui::TextureHandle;
 use image::RgbaImage;
@@ -16,11 +17,18 @@ use winit::dpi::PhysicalPosition;
 use winit::dpi::PhysicalSize;
 use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
+use winit::event_loop::EventLoopProxy;
 use winit::window::Window;
 use winit::window::WindowAttributes;
 use winit::window::WindowId;
 use winit::window::WindowLevel;
 
+use crate::actions;
+use crate::app::UserEvent;
+use crate::config::MouseGesture;
+use crate::config::MouseInput;
+use crate::config::PinMouseAction;
+use crate::config::PinMouseBindings;
 use crate::config::format_filename;
 use crate::graphics::RenderedWindow;
 use crate::i18n::Language;
@@ -40,6 +48,10 @@ pub struct PinWindow {
     drag_offset: Option<egui::Vec2>,
     language: Language,
     filename_template: String,
+    mouse: PinMouseBindings,
+    proxy: EventLoopProxy<UserEvent>,
+    zoom: f32,
+    group: u8,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -55,6 +67,8 @@ impl PinWindow {
         position: PhysicalPosition<i32>,
         language: Language,
         filename_template: String,
+        mouse: PinMouseBindings,
+        proxy: EventLoopProxy<UserEvent>,
     ) -> anyhow::Result<Self> {
         let (w, h) = image.dimensions();
         // Wayland 后端会忽略窗口层级；但 Wayland 会话下若走 XWayland（X11）后端，
@@ -107,11 +121,45 @@ impl PinWindow {
             drag_offset: None,
             language,
             filename_template,
+            mouse,
+            proxy,
+            zoom: 1.0,
+            group: 0,
         })
     }
 
     pub fn window_id(&self) -> WindowId {
         self.rendered.window_id()
+    }
+
+    pub fn request_redraw(&self) {
+        self.rendered.window().request_redraw();
+    }
+
+    pub fn group(&self) -> u8 {
+        self.group
+    }
+
+    pub fn set_group(&mut self, group: u8) {
+        self.group = group;
+    }
+
+    pub fn set_mouse_bindings(&mut self, mouse: PinMouseBindings) {
+        self.mouse = mouse;
+    }
+
+    pub fn set_visible(&self, visible: bool) {
+        self.rendered.window().set_visible(visible);
+        if visible {
+            self.rendered.window().request_redraw();
+        }
+    }
+
+    /// 开启鼠标穿透后窗口不再接收指针事件（Windows / macOS / X11）。
+    pub fn set_click_through(&self, click_through: bool) {
+        if let Err(e) = self.rendered.window().set_cursor_hittest(!click_through) {
+            log::warn!("设置贴图鼠标穿透失败: {e}");
+        }
     }
 
     /// 返回 `true` 表示贴图窗口应被关闭。
@@ -149,6 +197,9 @@ impl PinWindow {
         let drag_offset = &mut self.drag_offset;
         let language = self.language;
         let filename_template = &self.filename_template;
+        let mouse = self.mouse;
+        let proxy = self.proxy.clone();
+        let zoom = &mut self.zoom;
         self.rendered.render(|ui| {
             pin_ui(
                 ui,
@@ -160,6 +211,9 @@ impl PinWindow {
                 drag_offset,
                 language,
                 filename_template,
+                mouse,
+                &proxy,
+                zoom,
             );
         });
     }
@@ -176,6 +230,9 @@ fn pin_ui(
     drag_offset: &mut Option<egui::Vec2>,
     language: Language,
     filename_template: &str,
+    mouse: PinMouseBindings,
+    proxy: &EventLoopProxy<UserEvent>,
+    zoom: &mut f32,
 ) {
     let ctx = ui.ctx().clone();
     let rect = ctx.viewport_rect();
@@ -204,29 +261,36 @@ fn pin_ui(
         egui::Sense::click_and_drag(),
     );
 
-    let mut action = None;
-    response.context_menu(|ui| {
-        ui.add_enabled(
-            false,
-            egui::Button::new(format!(
-                "{}: {} × {} px",
-                t(language, "pin.size"),
-                image.width(),
-                image.height()
-            )),
-        );
-        ui.separator();
-        if ui.button(t(language, "pin.save")).clicked() {
-            action = Some(PinAction::Save);
-            ui.close();
-        }
-        if ui.button(t(language, "pin.destroy")).clicked() {
-            action = Some(PinAction::Destroy);
-            ui.close();
-        }
+    // 右键菜单会拦截点击；用户显式把某个操作绑到右键时以鼠标绑定优先。
+    let right_bound = PinMouseAction::ALL.into_iter().any(|action| {
+        let binding = mouse.get(action);
+        binding.enabled && binding.input == MouseInput::Right
     });
+    let mut menu_action = None;
+    if !right_bound {
+        response.context_menu(|ui| {
+            ui.add_enabled(
+                false,
+                egui::Button::new(format!(
+                    "{}: {} × {} px",
+                    t(language, "pin.size"),
+                    image.width(),
+                    image.height()
+                )),
+            );
+            ui.separator();
+            if ui.button(t(language, "pin.save")).clicked() {
+                menu_action = Some(PinAction::Save);
+                ui.close();
+            }
+            if ui.button(t(language, "pin.destroy")).clicked() {
+                menu_action = Some(PinAction::Destroy);
+                ui.close();
+            }
+        });
+    }
 
-    match action {
+    match menu_action {
         Some(PinAction::Save) => {
             if let Some(path) = choose_folder_and_save(image, filename_template, language) {
                 log::info!("贴图已保存: {}", path.display());
@@ -239,17 +303,108 @@ fn pin_ui(
         None => {}
     }
 
-    // 用 egui 的拖拽判定替代原始按下事件：菜单弹层会拦截点击，
-    // 不会在点击菜单项时误触发窗口拖动。
+    let pointer_over_ui = ctx.input(|i| i.pointer.latest_pos()).is_some_and(|p| {
+        ctx.layer_id_at(p)
+            .is_some_and(|layer| layer != egui::LayerId::background())
+    });
+    let modifiers = ctx.input(|i| i.modifiers);
+    let wheel = ctx.input(|i| {
+        i.events.iter().find_map(|event| {
+            let egui::Event::MouseWheel {
+                delta, modifiers, ..
+            } = event
+            else {
+                return None;
+            };
+            let input = if delta.y > 0.0 {
+                MouseInput::WheelUp
+            } else if delta.y < 0.0 {
+                MouseInput::WheelDown
+            } else {
+                return None;
+            };
+            Some((input, *modifiers))
+        })
+    });
+    let wheel_modifiers = wheel
+        .map(|(_, modifiers)| modifiers)
+        .unwrap_or(Modifiers::NONE);
+
+    if !pointer_over_ui {
+        let mut triggered = None;
+        for action in PinMouseAction::ALL {
+            let binding = mouse.get(action);
+            if !binding.enabled {
+                continue;
+            }
+            let hit = match binding.input {
+                MouseInput::WheelUp => wheel.is_some_and(|(input, _)| input == MouseInput::WheelUp),
+                MouseInput::WheelDown => {
+                    wheel.is_some_and(|(input, _)| input == MouseInput::WheelDown)
+                }
+                MouseInput::Left => {
+                    button_hit(&response, egui::PointerButton::Primary, binding.gesture)
+                }
+                MouseInput::Middle => {
+                    button_hit(&response, egui::PointerButton::Middle, binding.gesture)
+                }
+                MouseInput::Right => {
+                    button_hit(&response, egui::PointerButton::Secondary, binding.gesture)
+                }
+            };
+            let binding_modifiers = if binding.input.is_wheel() {
+                wheel_modifiers
+            } else {
+                modifiers
+            };
+            if hit && binding.matches_modifiers(binding_modifiers) {
+                triggered = Some(action);
+                break;
+            }
+        }
+        if let Some(action) = triggered {
+            apply_mouse_action(
+                action,
+                image,
+                close_requested,
+                zoom,
+                window,
+                language,
+                filename_template,
+                proxy,
+            );
+        }
+    }
+
+    // 移动：左键始终可以拖动；鼠标设置里的「移动」还可以绑定其他按键。
+    let move_button = PinMouseAction::ALL.into_iter().find_map(|action| {
+        if action != PinMouseAction::Move {
+            return None;
+        }
+        let binding = mouse.get(action);
+        if !binding.enabled || binding.gesture != MouseGesture::Drag {
+            return None;
+        }
+        pointer_button(binding.input)
+    });
+    let buttons = [Some(egui::PointerButton::Primary), move_button];
+
     if manual_drag {
         // X11 下自己移动窗口，不依赖 WM 是否实现 `_NET_WM_MOVERESIZE`。
         let scale = window.scale_factor() as f32;
-        if response.drag_started_by(egui::PointerButton::Primary) {
+        if buttons
+            .iter()
+            .flatten()
+            .any(|button| response.drag_started_by(*button))
+        {
             *drag_offset = ctx
                 .input(|i| i.pointer.latest_pos())
                 .map(|p| egui::vec2(p.x * scale, p.y * scale));
         }
-        if response.dragged_by(egui::PointerButton::Primary)
+        if buttons
+            .iter()
+            .flatten()
+            .any(|button| response.dragged_by(*button))
             && let (Some(offset), Some(pointer), Ok(position)) = (
                 *drag_offset,
                 ctx.input(|i| i.pointer.latest_pos()),
@@ -261,9 +416,84 @@ fn pin_ui(
         if response.drag_stopped() {
             *drag_offset = None;
         }
-    } else if response.drag_started_by(egui::PointerButton::Primary) {
+    } else if buttons
+        .iter()
+        .flatten()
+        .any(|button| response.drag_started_by(*button))
+    {
         let _ = window.drag_window();
     }
+}
+
+fn button_hit(
+    response: &egui::Response,
+    button: egui::PointerButton,
+    gesture: MouseGesture,
+) -> bool {
+    match gesture {
+        MouseGesture::Click => response.clicked_by(button),
+        MouseGesture::DoubleClick => response.double_clicked_by(button),
+        MouseGesture::Drag => response.drag_started_by(button),
+        MouseGesture::Scroll => false,
+    }
+}
+
+fn pointer_button(input: MouseInput) -> Option<egui::PointerButton> {
+    match input {
+        MouseInput::Left => Some(egui::PointerButton::Primary),
+        MouseInput::Middle => Some(egui::PointerButton::Middle),
+        MouseInput::Right => Some(egui::PointerButton::Secondary),
+        MouseInput::WheelUp | MouseInput::WheelDown => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_mouse_action(
+    action: PinMouseAction,
+    image: &RgbaImage,
+    close_requested: &mut bool,
+    zoom: &mut f32,
+    window: &Window,
+    language: Language,
+    filename_template: &str,
+    proxy: &EventLoopProxy<UserEvent>,
+) {
+    match action {
+        PinMouseAction::ZoomIn => set_zoom(image, zoom, window, *zoom * 1.15),
+        PinMouseAction::ZoomOut => set_zoom(image, zoom, window, *zoom / 1.15),
+        PinMouseAction::ResetZoom => set_zoom(image, zoom, window, 1.0),
+        PinMouseAction::Copy => match actions::copy(image) {
+            actions::ActionOutcome::Copied => log::info!("贴图已复制到剪贴板"),
+            actions::ActionOutcome::Failed(error) => log::warn!("复制贴图失败: {error}"),
+            actions::ActionOutcome::Saved(_) => {}
+        },
+        PinMouseAction::Save => {
+            if let Some(path) = choose_folder_and_save(image, filename_template, language) {
+                log::info!("贴图已保存: {}", path.display());
+            }
+        }
+        PinMouseAction::Close => {
+            log::info!("贴图已销毁");
+            *close_requested = true;
+        }
+        PinMouseAction::Move => {}
+        PinMouseAction::ToggleClickThrough => {
+            let _ = proxy.send_event(UserEvent::ToggleClickThrough);
+        }
+    }
+}
+
+fn set_zoom(image: &RgbaImage, zoom: &mut f32, window: &Window, target: f32) {
+    let target = target.clamp(0.1, 8.0);
+    if (target - *zoom).abs() < f32::EPSILON {
+        return;
+    }
+    *zoom = target;
+    let (width, height) = image.dimensions();
+    let _ = window.request_inner_size(PhysicalSize::new(
+        (width as f32 * target).round().max(1.0) as u32,
+        (height as f32 * target).round().max(1.0) as u32,
+    ));
 }
 
 /// 手动拖拽的移动目标（物理像素）：指针全局位置减去按下时的抓取偏移。

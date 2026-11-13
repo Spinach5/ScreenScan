@@ -6,9 +6,7 @@ use std::time::Instant;
 use global_hotkey::GlobalHotKeyEvent;
 use global_hotkey::GlobalHotKeyManager;
 use global_hotkey::HotKeyState;
-use global_hotkey::hotkey::Code;
 use global_hotkey::hotkey::HotKey;
-use global_hotkey::hotkey::Modifiers;
 use image::RgbaImage;
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
@@ -17,11 +15,13 @@ use winit::event_loop::ControlFlow;
 use winit::event_loop::EventLoopProxy;
 use winit::window::WindowId;
 
+use crate::actions;
 use crate::autostart;
 use crate::capture;
 use crate::capture::CaptureFailure;
 use crate::capture::CapturedMonitor;
 use crate::config::ConfigStore;
+use crate::config::GlobalAction;
 use crate::config::TrayIconSetting;
 use crate::font;
 use crate::font::FontEntry;
@@ -37,6 +37,9 @@ use crate::settings::SettingsWindow;
 use crate::tray;
 use crate::tray::Tray;
 use crate::util;
+
+/// 贴图组数量；全局快捷键按顺序循环切换。
+const PIN_GROUP_COUNT: u8 = 3;
 
 /// 跨线程送回主线程的事件。
 pub enum UserEvent {
@@ -56,6 +59,10 @@ pub enum UserEvent {
     CaptureFailed(CaptureFailure),
     /// 用户完成系统截屏授权，可以重新抓屏。
     PermissionGranted,
+    /// 延迟截屏倒计时结束。
+    TriggerCapture,
+    /// 请求切换所有贴图的鼠标穿透状态（贴图鼠标操作触发）。
+    ToggleClickThrough,
     /// 全局快捷键事件。
     Hotkey { id: u32, pressed: bool },
     /// 托盘菜单点击（携带菜单项 id）。
@@ -85,8 +92,14 @@ pub struct App {
     /// 常驻等待全局快捷键。
     resident: bool,
     hotkey_manager: Option<GlobalHotKeyManager>,
-    capture_hotkey: Option<u32>,
-    quit_hotkey: Option<u32>,
+    hotkey_actions: HashMap<u32, GlobalAction>,
+    registered_hotkeys: Vec<HotKey>,
+    /// 下一次抓屏是否使用「截屏并自动复制」。
+    auto_copy_next: bool,
+    /// 当前贴图组（0 起）。
+    pin_group: u8,
+    pins_visible: bool,
+    pins_click_through: bool,
     store: ConfigStore,
     tray: Option<Tray>,
     settings: Option<SettingsWindow>,
@@ -116,8 +129,12 @@ impl App {
             one_shot,
             resident: false,
             hotkey_manager: None,
-            capture_hotkey: None,
-            quit_hotkey: None,
+            hotkey_actions: HashMap::new(),
+            registered_hotkeys: Vec::new(),
+            auto_copy_next: false,
+            pin_group: 0,
+            pins_visible: true,
+            pins_click_through: false,
             store,
             tray: None,
             settings: None,
@@ -128,11 +145,12 @@ impl App {
         }
     }
 
-    fn trigger_capture(&mut self) {
+    fn request_capture(&mut self, auto_copy: bool) {
         if self.capturing || !self.overlays.is_empty() {
             return;
         }
         self.capturing = true;
+        self.auto_copy_next = auto_copy;
         let proxy = self.proxy.clone();
         std::thread::spawn(move || match capture::capture_all() {
             Ok(screens) => {
@@ -142,6 +160,31 @@ impl App {
                 let _ = proxy.send_event(UserEvent::CaptureFailed(capture::classify(&e)));
             }
         });
+    }
+
+    /// 自定义截屏：倒计时结束后再抓屏。
+    fn request_delayed_capture(&mut self) {
+        let delay = self.store.config.capture_delay;
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(delay as u64));
+            let _ = proxy.send_event(UserEvent::TriggerCapture);
+        });
+    }
+
+    fn pin_clipboard(&mut self, event_loop: &ActiveEventLoop) {
+        match actions::read_clipboard_image() {
+            Ok(image) => {
+                let position = platform::pointer_position().unwrap_or((100, 100));
+                self.open_pin(
+                    event_loop,
+                    image,
+                    winit::dpi::PhysicalPosition::new(position.0, position.1),
+                    false,
+                );
+            }
+            Err(e) => log::warn!("剪贴板中没有可用图片: {e}"),
+        }
     }
 
     /// 打开授权引导窗口。本窗口获得焦点后，系统才允许弹出截屏授权对话框。
@@ -194,6 +237,7 @@ impl App {
     fn open_overlays(&mut self, event_loop: &ActiveEventLoop, screens: Vec<CapturedMonitor>) {
         self.capturing = false;
         let filename_template = self.store.config.effective_filename_format().to_owned();
+        let auto_copy = std::mem::take(&mut self.auto_copy_next);
 
         for screen in screens {
             log::info!(
@@ -212,6 +256,7 @@ impl App {
                 self.proxy.clone(),
                 filename_template.clone(),
                 self.store.config.shortcuts,
+                auto_copy,
             ) {
                 Ok(overlay) => {
                     let id = overlay.window_id();
@@ -294,17 +339,67 @@ impl App {
         event_loop: &ActiveEventLoop,
         image: RgbaImage,
         position: winit::dpi::PhysicalPosition<i32>,
+        close_overlays: bool,
     ) {
         let language = self.store.config.language;
         let filename_template = self.store.config.effective_filename_format().to_owned();
-        match PinWindow::create(event_loop, image, position, language, filename_template) {
-            Ok(pin) => {
+        let mouse = self.store.config.pin_mouse;
+        let proxy = self.proxy.clone();
+        match PinWindow::create(
+            event_loop,
+            image,
+            position,
+            language,
+            filename_template,
+            mouse,
+            proxy,
+        ) {
+            Ok(mut pin) => {
+                pin.set_group(self.pin_group);
+                pin.set_click_through(self.pins_click_through);
+                self.pins_visible = true;
                 let id = pin.window_id();
                 self.pins.insert(id, pin);
-                // 贴图窗口创建成功后，结束本次截图会话
-                self.overlays.clear();
+                self.apply_pin_state();
+                // 只有从截图覆盖层发起的贴图才结束本次截图会话。
+                if close_overlays {
+                    self.overlays.clear();
+                }
             }
             Err(e) => log::error!("failed to create pin window: {e}"),
+        }
+    }
+
+    fn apply_pin_state(&self) {
+        for pin in self.pins.values() {
+            pin.set_visible(self.pins_visible && pin.group() == self.pin_group);
+            pin.set_click_through(self.pins_click_through);
+        }
+    }
+
+    fn toggle_pins(&mut self) {
+        self.pins_visible = !self.pins_visible;
+        self.apply_pin_state();
+    }
+
+    fn next_pin_group(&mut self) {
+        self.pin_group = (self.pin_group + 1) % PIN_GROUP_COUNT;
+        self.pins_visible = true;
+        self.apply_pin_state();
+        log::info!("切换到贴图组 {}", self.pin_group + 1);
+    }
+
+    fn toggle_click_through(&mut self) {
+        self.pins_click_through = !self.pins_click_through;
+        self.apply_pin_state();
+        log::info!("贴图鼠标穿透: {}", self.pins_click_through);
+    }
+
+    fn sync_pin_mouse(&mut self) {
+        let mouse = self.store.config.pin_mouse;
+        for pin in self.pins.values_mut() {
+            pin.set_mouse_bindings(mouse);
+            pin.request_redraw();
         }
     }
 
@@ -332,8 +427,8 @@ impl App {
 
     fn handle_tray_action(&mut self, action: &str, event_loop: &ActiveEventLoop) {
         match action {
-            tray::ACTION_CAPTURE => self.trigger_capture(),
-            tray::ACTION_PIN => log::info!("贴图流程入口（预留）"),
+            tray::ACTION_CAPTURE => self.request_capture(false),
+            tray::ACTION_PIN => self.pin_clipboard(event_loop),
             tray::ACTION_CLEAR => {
                 let lang = self.store.config.language;
                 match history::clear() {
@@ -344,6 +439,19 @@ impl App {
             tray::ACTION_PREFERENCES => self.open_settings(event_loop),
             tray::ACTION_QUIT => event_loop.exit(),
             other => log::warn!("未知托盘菜单项: {other}"),
+        }
+    }
+
+    fn handle_global_action(&mut self, action: GlobalAction, event_loop: &ActiveEventLoop) {
+        match action {
+            GlobalAction::Capture => self.request_capture(false),
+            GlobalAction::CaptureCopy => self.request_capture(true),
+            GlobalAction::CustomCapture => self.request_delayed_capture(),
+            GlobalAction::Pin => self.pin_clipboard(event_loop),
+            GlobalAction::TogglePins => self.toggle_pins(),
+            GlobalAction::NextPinGroup => self.next_pin_group(),
+            GlobalAction::ToggleClickThrough => self.toggle_click_through(),
+            GlobalAction::Quit => event_loop.exit(),
         }
     }
 
@@ -427,6 +535,8 @@ impl App {
             match effect {
                 SettingsEffect::Save => save = true,
                 SettingsEffect::ScanFonts => self.scan_fonts(),
+                SettingsEffect::GlobalShortcuts => self.setup_hotkeys(),
+                SettingsEffect::PinMouse => self.sync_pin_mouse(),
                 SettingsEffect::FontSelected(choice) => {
                     let lang = self.store.config.language;
                     let valid = match &choice {
@@ -490,7 +600,7 @@ impl App {
         }
     }
 
-    fn setup_hotkeys(&mut self, event_loop: &ActiveEventLoop) {
+    fn setup_hotkeys(&mut self) {
         if self.one_shot || platform::is_wayland() {
             log::info!(
                 "一次性模式或 Wayland：不注册全局快捷键。\
@@ -499,47 +609,58 @@ impl App {
             return;
         }
 
-        match GlobalHotKeyManager::new() {
-            Ok(manager) => {
-                let capture_key =
-                    HotKey::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyS);
-                let quit_key = HotKey::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyQ);
+        if self.hotkey_manager.is_none() {
+            match GlobalHotKeyManager::new() {
+                Ok(manager) => {
+                    self.hotkey_manager = Some(manager);
 
-                if let Err(e) = manager.register(capture_key) {
-                    log::warn!("注册截图快捷键失败: {e}");
-                }
-                if let Err(e) = manager.register(quit_key) {
-                    log::warn!("注册退出快捷键失败: {e}");
-                }
-
-                self.capture_hotkey = Some(capture_key.id());
-                self.quit_hotkey = Some(quit_key.id());
-                self.hotkey_manager = Some(manager);
-                self.resident = true;
-
-                // 快捷键事件在独立线程产生，转成 UserEvent 唤醒主事件循环
-                let receiver = GlobalHotKeyEvent::receiver().clone();
-                let proxy = self.proxy.clone();
-                std::thread::spawn(move || {
-                    while let Ok(event) = receiver.recv() {
-                        let pressed = event.state == HotKeyState::Pressed;
-                        let msg = UserEvent::Hotkey {
-                            id: event.id,
-                            pressed,
-                        };
-                        if proxy.send_event(msg).is_err() {
-                            break;
+                    // 快捷键事件在独立线程产生，转成 UserEvent 唤醒主事件循环
+                    let receiver = GlobalHotKeyEvent::receiver().clone();
+                    let proxy = self.proxy.clone();
+                    std::thread::spawn(move || {
+                        while let Ok(event) = receiver.recv() {
+                            let pressed = event.state == HotKeyState::Pressed;
+                            let msg = UserEvent::Hotkey {
+                                id: event.id,
+                                pressed,
+                            };
+                            if proxy.send_event(msg).is_err() {
+                                break;
+                            }
                         }
-                    }
-                });
-
-                log::info!("全局快捷键: Ctrl+Shift+S 截图 / Ctrl+Shift+Q 退出");
-            }
-            Err(e) => {
-                log::warn!("初始化全局快捷键失败，退回一次性模式: {e}");
-                let _ = event_loop;
+                    });
+                }
+                Err(e) => {
+                    log::warn!("初始化全局快捷键失败: {e}");
+                    return;
+                }
             }
         }
+
+        let manager = self.hotkey_manager.as_ref().expect("hotkey manager exists");
+        if !self.registered_hotkeys.is_empty() {
+            if let Err(e) = manager.unregister_all(&self.registered_hotkeys) {
+                log::warn!("注销旧全局快捷键失败: {e}");
+            }
+            self.registered_hotkeys.clear();
+        }
+        self.hotkey_actions.clear();
+
+        for action in GlobalAction::ALL {
+            let Some(hotkey) = self.store.config.global_shortcuts.get(action).to_global() else {
+                continue;
+            };
+            match manager.register(hotkey) {
+                Ok(()) => {
+                    self.registered_hotkeys.push(hotkey);
+                    self.hotkey_actions.insert(hotkey.id(), action);
+                }
+                Err(e) => log::warn!("注册全局快捷键 {} 失败: {e}", action.config_key()),
+            }
+        }
+
+        self.resident = true;
+        log::info!("已注册 {} 个全局快捷键", self.registered_hotkeys.len());
     }
 }
 
@@ -551,15 +672,15 @@ impl ApplicationHandler<UserEvent> for App {
         self.started = true;
 
         if self.one_shot {
-            self.setup_hotkeys(event_loop);
-            self.trigger_capture();
+            self.setup_hotkeys();
+            self.request_capture(false);
             return;
         }
 
         // 无参数启动：不显示主窗口，直接驻留托盘。
         self.resident = true;
         self.create_tray();
-        self.setup_hotkeys(event_loop);
+        self.setup_hotkeys();
         if self.show_settings_on_start {
             self.open_settings(event_loop);
         }
@@ -574,9 +695,11 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::PermissionGranted => {
                 self.capturing = false;
                 self.permission = None;
-                self.trigger_capture();
+                self.request_capture(self.auto_copy_next);
             }
-            UserEvent::Pin { image, position } => self.open_pin(event_loop, image, position),
+            UserEvent::TriggerCapture => self.request_capture(false),
+            UserEvent::ToggleClickThrough => self.toggle_click_through(),
+            UserEvent::Pin { image, position } => self.open_pin(event_loop, image, position, true),
             UserEvent::ScanResult { window_id, text } => {
                 if let Some(overlay) = self.overlays.get_mut(&window_id) {
                     overlay.set_scan_result(text);
@@ -600,11 +723,13 @@ impl ApplicationHandler<UserEvent> for App {
                     CaptureFailure::Cancelled => {
                         log::info!("截图已取消");
                         self.permission = None;
+                        self.auto_copy_next = false;
                         self.finish_session_if_idle(event_loop);
                     }
                     CaptureFailure::Other(message) => {
                         log::error!("capture failed: {message}");
                         self.permission = None;
+                        self.auto_copy_next = false;
                         self.finish_session_if_idle(event_loop);
                     }
                 }
@@ -613,11 +738,8 @@ impl ApplicationHandler<UserEvent> for App {
                 if !pressed {
                     return;
                 }
-                if Some(id) == self.quit_hotkey {
-                    log::info!("收到退出快捷键");
-                    event_loop.exit();
-                } else if Some(id) == self.capture_hotkey {
-                    self.trigger_capture();
+                if let Some(action) = self.hotkey_actions.get(&id).copied() {
+                    self.handle_global_action(action, event_loop);
                 }
             }
             UserEvent::TrayAction(action) => self.handle_tray_action(&action, event_loop),

@@ -72,7 +72,7 @@ ScreenScan 是一个用 Rust 编写的桌面截图工具，交互对标 Snipaste
 - **标注工具**：画笔、涂鸦、橡皮擦；可调颜色与线宽（1–30 px）；按笔画擦除；完整的撤销 / 重做。
 - **四种输出动作**：复制到剪贴板、另存为 PNG / JPEG / WebP、贴图悬浮窗、条码 / 二维码识别。
 - **二维码 / 条码扫描**：后台识别，自动尝试原图、反色、2× 放大三轮预处理；支持 QR、Data Matrix、PDF417、Aztec、Code 128、Code 39、EAN-13；识别结果自动复制到剪贴板。
-- **常驻托盘与首选项**：托盘菜单、开机启动、界面字体、自定义托盘图标、日志级别、文件名模板、托盘与首选项中英文界面。
+- **常驻托盘与首选项**：可配置的全局快捷键与应用内快捷键、贴图鼠标操作、开机启动、界面字体、自定义托盘图标、日志级别、文件名模板、托盘与首选项中英文界面。
 - **跨平台发布**：CI 自动构建 Windows（zip / NSIS 安装包）、macOS（.app / dmg / zip）、Linux（deb / rpm / pacman / AppImage / tar.xz），覆盖 x86_64 与 arm64。
 
 ## 平台支持
@@ -218,7 +218,7 @@ makensis /DVERSION=0.1.0 /DARCH=x86_64 packaging/windows/installer.nsi
 
 - **无参数启动**：不显示主窗口，直接驻留系统托盘，并尝试注册全局快捷键。
 - **托盘菜单**：左键或右键点击托盘图标打开菜单，选择「截屏」。
-- **全局快捷键**：非 Wayland 且常驻运行时，`Ctrl+Shift+S` 截屏，`Ctrl+Shift+Q` 退出。
+- **全局快捷键**：非 Wayland 且常驻运行时生效，默认 `Ctrl+Shift+S` 截屏、`F2` 贴图、`F3` 截屏并自动复制、`F4` 延迟截屏、`F6` 显隐贴图、`F7` 切换贴图组、`F8` 鼠标穿透、`Ctrl+Shift+Q` 退出，可在「首选项 → 控制」中修改。
 - **命令行**：`screenscan -c` 执行一次截图，适合绑定到桌面环境的自定义快捷键（Wayland 推荐方式）。
 - **首选项**：托盘菜单「首选项」，或启动时加 `--preferences`。
 
@@ -270,7 +270,10 @@ makensis /DVERSION=0.1.0 /DARCH=x86_64 packaging/windows/installer.nsi
 贴图窗口是悬浮在屏幕最上层的无边框图像（与 Snipaste 贴图一致），显示带标注的合成图像：
 
 - 贴图出现在选区原来的位置，在图像任意位置按住左键可拖动窗口。
-- 右键弹出菜单：查看当前尺寸（如 `300 × 200 px`）、保存到指定目录、销毁贴图；`Esc` 也可直接销毁。
+- 默认鼠标操作：滚轮缩放、中键拖拽移动、`Ctrl+左键单击` 复制、`Ctrl+中键单击` 保存、左键双击关闭、中键单击重置缩放、`Ctrl+Shift+中键单击` 开/关鼠标穿透。这些组合可在「首选项 → 控制 → 鼠标」中修改或清除，冲突时按列表从上到下优先匹配。
+- 贴图分为 3 个组；全局快捷键可循环切换贴图组、隐藏或显示所有贴图。新贴图加入当前组。
+- 开启鼠标穿透后贴图不再接收鼠标事件，需要再按一次全局快捷键（默认 `F8`）恢复。
+- 右键弹出菜单：查看当前尺寸（如 `300 × 200 px`）、保存到指定目录、销毁贴图；`Esc` 也可直接销毁。若某个操作绑定了右键，则以鼠标操作为准，右键菜单不再弹出。
 - Linux X11（含 Wayland 会话下的 XWayland）下为 `Utility` 窗口，通常不进入任务栏 / Alt+Tab，拖动与聚焦交给窗口管理器；Windows 下为跳过任务栏的工具窗口。
 - Windows / macOS / X11 下保持置顶；Windows / macOS 窗口失去焦点时会重新断言置顶。
 - 原生 Wayland 会话下无法通用置顶和绝对定位，窗口降级为普通无边框窗口（会出现在任务栏中，位置由合成器决定）。
@@ -291,7 +294,7 @@ makensis /DVERSION=0.1.0 /DARCH=x86_64 packaging/windows/installer.nsi
 | 菜单项 | 行为 |
 | --- | --- |
 | 截屏 | 抓取全部显示器并进入截图流程 |
-| 贴图 | 入口已预留，当前版本无操作；请使用截图工具栏中的「贴图」 |
+| 贴图 | 把剪贴板中的图片贴到鼠标位置；剪贴板没有图片时只记录日志 |
 | 清空截图记录 | 删除 `~/.screenscan/history` 目录（截图历史存储目前为预留接口） |
 | 首选项 | 打开设置窗口 |
 | 退出 | 退出应用 |
@@ -301,14 +304,23 @@ makensis /DVERSION=0.1.0 /DARCH=x86_64 packaging/windows/installer.nsi
 | 快捷键 | 作用域 | 说明 |
 | --- | --- | --- |
 | `Ctrl+Shift+S` | 全局（Windows / macOS / X11） | 开始截图 |
+| `F3` | 全局（Windows / macOS / X11） | 截屏并在确认选区后直接复制 |
+| `F4` | 全局（Windows / macOS / X11） | 延迟截屏（默认 3 秒，可在控制页修改） |
+| `F2` | 全局（Windows / macOS / X11） | 把剪贴板图片贴到鼠标位置 |
+| `F6` | 全局（Windows / macOS / X11） | 隐藏 / 显示所有贴图 |
+| `F7` | 全局（Windows / macOS / X11） | 切换到下一个贴图组 |
+| `F8` | 全局（Windows / macOS / X11） | 开 / 关贴图鼠标穿透 |
 | `Ctrl+Shift+Q` | 全局（Windows / macOS / X11） | 退出应用 |
 | `↑` / `↓` / `←` / `→` | 截图覆盖层（选区阶段） | 按 1 个逻辑点移动选区 |
 | `Ctrl+C` | 截图覆盖层（选区阶段） | 复制选区并结束截图 |
+| `Ctrl+S` | 截图覆盖层（选区阶段） | 保存选区 |
 | `Ctrl+A` | 截图覆盖层（选区阶段） | 选区重置为全屏 |
 | `Ctrl+P` | 截图覆盖层（选区阶段） | 将选区贴成悬浮窗 |
+| `Ctrl+Z` / `Ctrl+Y` | 截图覆盖层（选区阶段） | 撤销 / 重做标注 |
+| `Ctrl+D` | 截图覆盖层（选区阶段） | 识别选区中的条码 |
 | `Esc` | 截图覆盖层 | 绘制中退回选区调整，否则退出截图 |
 
-选区快捷键可在「首选项 → 快捷键」中重新绑定。
+全局快捷键与应用内快捷键可在「首选项 → 控制」中重新绑定、清除或恢复默认。
 
 Wayland 不允许应用注册全局快捷键。请把 `screenscan -c` 绑定到桌面环境的自定义快捷键，例如：
 
@@ -329,12 +341,12 @@ Wayland 不允许应用注册全局快捷键。请把 `screenscan -c` 绑定到�
 
 ### 首选项
 
-所有修改即时生效并自动写回 `config.ini`。
+快捷键与鼠标操作点击确认按钮后生效，其余修改即时生效并自动写回 `config.ini`。
 
 | 标签页 | 内容 |
 | --- | --- |
 | 常规 | 开机启动；保存设置前备份配置；查看并迁移配置文件位置 |
-| 快捷键 | 重新绑定截图选区阶段的移动、复制、全屏与贴图快捷键 |
+| 控制 | 全局快捷键、应用内快捷键与贴图鼠标操作；支持录制、清除与恢复默认；设置自定义截屏延迟 |
 | 界面 | 选择系统中已安装的界面字体；使用默认或自定义托盘图标（支持 PNG / JPG / WebP / BMP / GIF，过大的图片会缩放） |
 | 输出 | 日志级别（无 / 调试 / 普通 / 错误）、打开日志目录、保存文件名模板及预览 |
 | 语言 | 简体中文 / English |
@@ -374,6 +386,7 @@ config_path=/path/to/your/config.ini
 [general]
 autostart=false
 auto_backup=true
+capture_delay=3
 
 [interface]
 ; 可选：自定义界面字体
@@ -395,8 +408,32 @@ move_down=Down
 move_left=Left
 move_right=Right
 copy=Ctrl+C
+save=Ctrl+S
 select_all=Ctrl+A
 pin=Ctrl+P
+undo=Ctrl+Z
+redo=Ctrl+Y
+scan=Ctrl+D
+
+[global_shortcuts]
+capture=Ctrl+Shift+S
+capture_copy=F3
+custom_capture=F4
+pin=F2
+toggle_pins=F6
+next_pin_group=F7
+toggle_click_through=F8
+quit=Ctrl+Shift+Q
+
+[pin_mouse]
+zoom_in=wheel_up+scroll
+zoom_out=wheel_down+scroll
+move=middle+drag
+copy=Ctrl+left+click
+save=Ctrl+middle+click
+close=left+double_click
+reset_zoom=middle+click
+toggle_click_through=Ctrl+Shift+middle+click
 ```
 
 ### 配置项说明
@@ -405,6 +442,7 @@ pin=Ctrl+P
 | --- | --- | --- | --- |
 | `general.autostart` | `true` / `false` | `false` | 登录后自动在托盘驻留 |
 | `general.auto_backup` | `true` / `false` | `false` | 保存前把旧配置备份为 `config.ini.bak` |
+| `general.capture_delay` | 整数秒（0–60） | `3` | 「自定义截屏」全局快捷键的延迟 |
 | `interface.font_path` | 字体文件路径 | 空 | 自定义界面字体；支持 `~` 展开 |
 | `interface.font_index` | 整数 | `0` | TTC / OTC 字体集合中的索引 |
 | `interface.font_family` | 字体族名 | 空 | 仅用于展示与记录 |
@@ -415,11 +453,16 @@ pin=Ctrl+P
 | `appearance.language` | `zh-CN` / `en-US` | `zh-CN` | 界面语言 |
 | `shortcuts.move_up` / `move_down` / `move_left` / `move_right` | 按键名，如 `Up`、`Ctrl+Up` | 方向键 | 选区阶段移动选区 |
 | `shortcuts.copy` | 组合键，如 `Ctrl+C` | `Ctrl+C` | 复制选区 |
+| `shortcuts.save` | 组合键，如 `Ctrl+S` | `Ctrl+S` | 保存选区 |
 | `shortcuts.select_all` | 组合键，如 `Ctrl+A` | `Ctrl+A` | 选区重置为全屏 |
 | `shortcuts.pin` | 组合键，如 `Ctrl+P` | `Ctrl+P` | 贴图 |
+| `shortcuts.undo` / `redo` | 组合键 | `Ctrl+Z` / `Ctrl+Y` | 撤销 / 重做标注 |
+| `shortcuts.scan` | 组合键 | `Ctrl+D` | 识别条码 |
+| `global_shortcuts.*` | 组合键，如 `F2`、`Ctrl+Shift+S`；空值禁用 | 见示例 | 截屏、贴图、贴图组、显隐、穿透、退出等全局动作 |
+| `pin_mouse.*` | `[修饰键+]<按钮>+<手势>`，如 `Ctrl+left+click`；空值禁用 | 见示例 | 贴图鼠标操作，按列表顺序匹配 |
 | `storage.config_path` | 绝对路径 | 无 | 仅出现在默认路径的引导文件中 |
 
-INI 解析器会忽略以 `;` 或 `#` 开头的注释，节名与键名不区分大小写。
+全局快捷键键名使用 `A`–`Z`、`0`–`9`、`F1`–`F24`、方向键、`Space` 等；鼠标按钮为 `left` / `middle` / `right` / `wheel_up` / `wheel_down`，手势为 `click` / `double_click` / `drag` / `scroll`。空值表示清除该绑定。INI 解析器会忽略以 `;` 或 `#` 开头的注释，节名与键名不区分大小写。
 
 ### 文件名模板
 
@@ -492,7 +535,7 @@ RUST_LOG=debug ./target/release/ScreenScan
 
 ### 功能状态
 
-- 托盘菜单中的「贴图」入口、截图历史存储、检查更新目前仍是占位或预留实现。
+- 托盘菜单中的截图历史存储、检查更新目前仍是占位或预留实现。
 - 界面语言切换目前作用于托盘菜单、首选项和授权窗口；截图工具栏与提示文本暂为中文。
 
 ## 架构
